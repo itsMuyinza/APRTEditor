@@ -9,10 +9,18 @@ interface CaptionPropertiesPanelProps {
 }
 
 const FONT_OPTIONS = [
+  // Creator fonts (from local asset library)
+  { value: 'Coco Gothic', label: '✦ Coco Gothic' },
+  { value: 'Glamor', label: '✦ Glamor' },
+  { value: 'Audrey', label: '✦ Audrey' },
+  { value: 'Balham', label: '✦ Balham' },
+  { value: 'Tuesday Night', label: '✦ Tuesday Night' },
+  { value: 'Quentin', label: '✦ Quentin' },
+  // Standard web fonts
+  { value: 'Montserrat', label: 'Montserrat' },
   { value: 'Inter', label: 'Inter' },
   { value: 'Roboto', label: 'Roboto' },
   { value: 'Poppins', label: 'Poppins' },
-  { value: 'Montserrat', label: 'Montserrat' },
   { value: 'Oswald', label: 'Oswald' },
   { value: 'Bebas Neue', label: 'Bebas Neue' },
   { value: 'Arial', label: 'Arial' },

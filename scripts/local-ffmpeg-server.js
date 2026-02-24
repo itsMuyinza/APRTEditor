@@ -1,7 +1,7 @@
 import http from 'http';
 import { spawn, execSync } from 'child_process';
 import { createWriteStream, createReadStream, unlinkSync, mkdirSync, existsSync, writeFileSync, readFileSync, readdirSync, statSync } from 'fs';
-import { join } from 'path';
+import { join, resolve } from 'path';
 import { tmpdir } from 'os';
 import { randomUUID } from 'crypto';
 import formidable from 'formidable';
@@ -37,6 +37,21 @@ const PORT = 3333;
 const TEMP_DIR = join(tmpdir(), 'hyperedit-ffmpeg');
 const SESSIONS_DIR = join(TEMP_DIR, 'sessions');
 
+// Creator's local asset library
+const LIBRARY_ROOT = '/Users/muyinza/Desktop/Video Work Folder';
+const FONTS_DIR = join(LIBRARY_ROOT, 'Transitions - Titles - Motion GFX', 'Fonts');
+const LIBRARY_THUMBS_DIR = join(TEMP_DIR, 'library-thumbs');
+
+// Library category mapping — maps category slugs to directory names
+const LIBRARY_CATEGORIES = {
+  overlays: { name: 'Overlays', dir: 'Overlays', extensions: ['mov', 'mp4', 'avi', 'webm', 'png', 'jpg', 'jpeg', 'tiff', 'tif'] },
+  transitions: { name: 'Transitions', dir: join('Transitions - Titles - Motion GFX', 'Transitions'), extensions: ['mov', 'mp4', 'avi', 'webm'] },
+  logos: { name: 'Logos', dir: 'LOGOS', extensions: ['png', 'jpg', 'jpeg', 'psd', 'mp4', 'mov'] },
+  music: { name: 'Music & SFX', dir: 'Music - SoundFX - Foley', extensions: ['mp3', 'wav', 'aac', 'm4a', 'ogg', 'flac'] },
+  luts: { name: 'LUTs', dir: 'LUTS', extensions: ['cube', '3dl', 'look'] },
+  video: { name: 'Video Assets', dir: 'Video Assets', extensions: ['mov', 'mp4', 'avi', 'webm', 'mkv'] },
+};
+
 // Active video sessions - keeps videos on disk between edits
 const sessions = new Map();
 
@@ -46,6 +61,9 @@ if (!existsSync(TEMP_DIR)) {
 }
 if (!existsSync(SESSIONS_DIR)) {
   mkdirSync(SESSIONS_DIR, { recursive: true });
+}
+if (!existsSync(LIBRARY_THUMBS_DIR)) {
+  mkdirSync(LIBRARY_THUMBS_DIR, { recursive: true });
 }
 
 // Restore sessions from disk on server start
@@ -1551,6 +1569,315 @@ async function getMediaInfo(inputPath) {
   }
 }
 
+// ============================================================
+// Local Asset Library Endpoints
+// ============================================================
+
+// Recursively collect files from a directory, filtered by extension
+function collectLibraryFiles(dirPath, extensions, basePath = dirPath, results = []) {
+  if (!existsSync(dirPath)) return results;
+  try {
+    const entries = readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = join(dirPath, entry.name);
+      if (entry.name.startsWith('.')) continue; // skip hidden files
+      if (entry.isDirectory()) {
+        collectLibraryFiles(fullPath, extensions, basePath, results);
+      } else if (entry.isFile()) {
+        const ext = entry.name.split('.').pop()?.toLowerCase();
+        if (extensions.includes(ext)) {
+          const relativePath = fullPath.substring(basePath.length + 1);
+          const subfolder = relativePath.includes('/') ? relativePath.substring(0, relativePath.lastIndexOf('/')) : '';
+          try {
+            const stats = statSync(fullPath);
+            results.push({
+              name: entry.name,
+              path: fullPath,
+              relativePath,
+              subfolder,
+              ext,
+              size: stats.size,
+              modified: stats.mtimeMs,
+            });
+          } catch {
+            // Skip files we can't stat
+          }
+        }
+      }
+    }
+  } catch {
+    // Skip directories we can't read
+  }
+  return results;
+}
+
+// GET /local-library/browse?category=overlays&subfolder=16mm+200T
+async function handleLibraryBrowse(req, res, url) {
+  const category = url.searchParams.get('category');
+  const subfolder = url.searchParams.get('subfolder') || '';
+
+  if (!category || !LIBRARY_CATEGORIES[category]) {
+    // Return list of all categories with their subfolders
+    const categories = {};
+    for (const [slug, cat] of Object.entries(LIBRARY_CATEGORIES)) {
+      const catDir = join(LIBRARY_ROOT, cat.dir);
+      let subfolders = [];
+      if (existsSync(catDir)) {
+        try {
+          subfolders = readdirSync(catDir, { withFileTypes: true })
+            .filter(d => d.isDirectory() && !d.name.startsWith('.'))
+            .map(d => d.name)
+            .sort();
+        } catch { /* skip */ }
+      }
+      categories[slug] = { name: cat.name, subfolders, exists: existsSync(catDir) };
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ categories }));
+    return;
+  }
+
+  const cat = LIBRARY_CATEGORIES[category];
+  const catDir = join(LIBRARY_ROOT, cat.dir);
+
+  if (!existsSync(catDir)) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: `Category directory not found: ${cat.dir}` }));
+    return;
+  }
+
+  // If subfolder specified, browse only that subfolder
+  const browseDir = subfolder ? join(catDir, subfolder) : catDir;
+
+  // Security: ensure path stays within LIBRARY_ROOT
+  const resolved = resolve(browseDir);
+  if (!resolved.startsWith(resolve(LIBRARY_ROOT))) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Access denied' }));
+    return;
+  }
+
+  const files = collectLibraryFiles(browseDir, cat.extensions, catDir);
+
+  // Get subfolders at the browse level
+  let subfolders = [];
+  try {
+    subfolders = readdirSync(browseDir, { withFileTypes: true })
+      .filter(d => d.isDirectory() && !d.name.startsWith('.'))
+      .map(d => d.name)
+      .sort();
+  } catch { /* skip */ }
+
+  // Add thumbnail URLs to file objects
+  const filesWithThumbs = files.map(f => ({
+    ...f,
+    thumbnailUrl: `/local-library/thumbnail?path=${encodeURIComponent(f.path)}`,
+    isImage: ['jpg', 'jpeg', 'png', 'gif', 'webp', 'tiff', 'tif'].includes(f.ext),
+    isVideo: ['mov', 'mp4', 'avi', 'webm', 'mkv'].includes(f.ext),
+    isAudio: ['mp3', 'wav', 'aac', 'm4a', 'ogg', 'flac'].includes(f.ext),
+    isLut: ['cube', '3dl', 'look'].includes(f.ext),
+  }));
+
+  res.writeHead(200, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify({
+    category,
+    categoryName: cat.name,
+    subfolder,
+    subfolders,
+    files: filesWithThumbs,
+    total: filesWithThumbs.length,
+  }));
+}
+
+// GET /local-library/thumbnail?path=/Users/.../file.mov
+async function handleLibraryThumbnail(req, res, url) {
+  const filePath = url.searchParams.get('path');
+
+  if (!filePath) {
+    res.writeHead(400, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Missing path parameter' }));
+    return;
+  }
+
+  // Security: ensure path is within LIBRARY_ROOT
+  const resolved = resolve(filePath);
+  if (!resolved.startsWith(resolve(LIBRARY_ROOT))) {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Access denied' }));
+    return;
+  }
+
+  if (!existsSync(resolved)) {
+    res.writeHead(404, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'File not found' }));
+    return;
+  }
+
+  // Generate a deterministic cache key from the file path
+  const { createHash } = await import('crypto');
+  const cacheKey = createHash('md5').update(resolved).digest('hex');
+  const thumbPath = join(LIBRARY_THUMBS_DIR, `${cacheKey}.jpg`);
+
+  // Check cache first
+  if (existsSync(thumbPath)) {
+    res.writeHead(200, {
+      'Content-Type': 'image/jpeg',
+      'Cache-Control': 'public, max-age=604800', // 1 week
+    });
+    createReadStream(thumbPath).pipe(res);
+    return;
+  }
+
+  // Generate thumbnail
+  const ext = resolved.split('.').pop()?.toLowerCase();
+  const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'tiff', 'tif'].includes(ext);
+  const isAudio = ['mp3', 'wav', 'aac', 'm4a', 'ogg', 'flac'].includes(ext);
+  const isLut = ['cube', '3dl', 'look'].includes(ext);
+
+  // LUTs and audio don't have visual thumbnails
+  if (isLut || isAudio) {
+    res.writeHead(204);
+    res.end();
+    return;
+  }
+
+  try {
+    await generateThumbnail(resolved, thumbPath, isImage);
+    res.writeHead(200, {
+      'Content-Type': 'image/jpeg',
+      'Cache-Control': 'public, max-age=604800',
+    });
+    createReadStream(thumbPath).pipe(res);
+  } catch (e) {
+    console.warn(`[Library] Thumbnail generation failed for ${resolved}:`, e.message);
+    res.writeHead(500, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ error: 'Thumbnail generation failed' }));
+  }
+}
+
+// POST /session/{id}/import-from-library  { path: '/Users/.../file.mov' }
+async function handleImportFromLibrary(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  try {
+    const body = await new Promise((resolve, reject) => {
+      let data = '';
+      req.on('data', chunk => { data += chunk; });
+      req.on('end', () => {
+        try { resolve(JSON.parse(data)); }
+        catch { reject(new Error('Invalid JSON')); }
+      });
+      req.on('error', reject);
+    });
+
+    const sourcePath = body.path;
+    if (!sourcePath) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Missing path' }));
+      return;
+    }
+
+    // Security: ensure source is within LIBRARY_ROOT
+    const resolvedSource = resolve(sourcePath);
+    if (!resolvedSource.startsWith(resolve(LIBRARY_ROOT))) {
+      res.writeHead(403, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Access denied — only files from the local library can be imported' }));
+      return;
+    }
+
+    if (!existsSync(resolvedSource)) {
+      res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Source file not found' }));
+      return;
+    }
+
+    const assetId = randomUUID();
+    const originalName = resolvedSource.split('/').pop();
+    const ext = originalName.split('.').pop()?.toLowerCase() || 'mp4';
+    const isImage = ['jpg', 'jpeg', 'png', 'gif', 'webp', 'tiff', 'tif'].includes(ext);
+    const isAudio = ['mp3', 'wav', 'aac', 'm4a', 'ogg', 'flac'].includes(ext);
+    const isLut = ['cube', '3dl', 'look'].includes(ext);
+    const type = isImage ? 'image' : isAudio ? 'audio' : isLut ? 'lut' : 'video';
+
+    // Copy file into session assets directory
+    const assetPath = join(session.assetsDir, `${assetId}.${ext}`);
+    const thumbPath = join(session.assetsDir, `${assetId}_thumb.jpg`);
+
+    const { copyFile, stat } = await import('fs/promises');
+    await copyFile(resolvedSource, assetPath);
+
+    // Get media info
+    let duration = 0;
+    let width = 0;
+    let height = 0;
+
+    if (!isAudio && !isLut) {
+      const info = await getMediaInfo(assetPath);
+      duration = info.duration;
+      width = info.width;
+      height = info.height;
+    } else if (isAudio) {
+      duration = await getVideoDuration(assetPath);
+    }
+
+    // Generate thumbnail (for video/image only)
+    if (!isAudio && !isLut) {
+      try {
+        await generateThumbnail(assetPath, thumbPath, isImage);
+      } catch (e) {
+        console.warn(`[${sessionId}] Library import thumbnail failed:`, e.message);
+      }
+    }
+
+    const stats = await stat(assetPath);
+
+    const asset = {
+      id: assetId,
+      type,
+      filename: originalName,
+      path: assetPath,
+      thumbPath: existsSync(thumbPath) ? thumbPath : null,
+      duration: isImage ? 5 : duration,
+      size: stats.size,
+      width,
+      height,
+      createdAt: Date.now(),
+      librarySource: resolvedSource, // Track where it came from
+    };
+
+    session.assets.set(assetId, asset);
+    saveAssetMetadata(session);
+
+    console.log(`[${sessionId}] Library import: ${originalName} → ${assetId} (${type}, ${(stats.size / 1024 / 1024).toFixed(1)} MB)`);
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({
+      success: true,
+      asset: {
+        id: asset.id,
+        type: asset.type,
+        filename: asset.filename,
+        duration: asset.duration,
+        size: asset.size,
+        width: asset.width,
+        height: asset.height,
+        thumbnailUrl: asset.thumbPath ? `/session/${sessionId}/assets/${assetId}/thumbnail` : null,
+        streamUrl: `/session/${sessionId}/assets/${assetId}/stream`,
+      },
+    }));
+
+  } catch (error) {
+    console.error(`[${sessionId}] Library import error:`, error.message);
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
 // Upload asset to session
 async function handleAssetUpload(req, res, sessionId) {
   const session = getSession(sessionId);
@@ -2659,7 +2986,10 @@ async function handleGiphyAdd(req, res, sessionId) {
 // Check if local Whisper is available
 async function checkLocalWhisper() {
   return new Promise((resolve) => {
-    const check = spawn('python3', ['-c', 'import whisper; print("ok")']);
+    // Use venv Python if available (Whisper is installed there)
+    const venvPython = join(process.cwd(), '.venv', 'bin', 'python3');
+    const pythonCmd = existsSync(venvPython) ? venvPython : 'python3';
+    const check = spawn(pythonCmd, ['-c', 'import whisper; print("ok")']);
     let output = '';
     check.stdout.on('data', (data) => { output += data.toString(); });
     check.on('close', (code) => {
@@ -2675,7 +3005,10 @@ async function runLocalWhisper(audioPath, jobId) {
 
   return new Promise((resolve, reject) => {
     console.log(`[${jobId}] Running local Whisper...`);
-    const whisperProcess = spawn('python3', [scriptPath, audioPath, 'base']);
+    // Use venv Python if available (Whisper is installed there)
+    const venvPython = join(process.cwd(), '.venv', 'bin', 'python3');
+    const pythonCmd = existsSync(venvPython) ? venvPython : 'python3';
+    const whisperProcess = spawn(pythonCmd, [scriptPath, audioPath, 'base']);
 
     let stdout = '';
     let stderr = '';
@@ -4004,7 +4337,7 @@ CRITICAL REQUIREMENTS:
 
     const ai = new GoogleGenAI({ apiKey });
 
-    const prompt = `You are a motion graphics designer. Create a JSON scene structure for an animated video based on this description:
+    const prompt = `You are a motion graphics designer specializing in documentary-style, cinematic animations. You prefer dark backgrounds, gold (#D4AF37) accents, serif typography, and slow deliberate pacing. Create a JSON scene structure for an animated video based on this description:
 
 "${description}"
 ${transcriptContext}${attachedAssetsContext}
@@ -4149,8 +4482,10 @@ Guidelines:
 - For a 5s animation use 3-4 scenes, for 10s use 5-7 scenes, for 15s use 7-10 scenes, for 30s use 12-18 scenes. Scale up proportionally.
 - NO scene should exceed 120 frames (4 seconds) unless it's a countdown or media showcase.
 - Total duration: ${durationSeconds ? `EXACTLY ${durationSeconds} seconds (${Math.round(durationSeconds * fps)} frames) - the user specifically requested this duration!` : '5-15 seconds (150-450 frames)'}
-- Use vibrant colors: #f97316 (orange), #3b82f6 (blue), #22c55e (green), #8b5cf6 (purple), #ec4899 (pink)
-- Make it visually engaging with good pacing
+- Default color palette: #D4AF37 (cinematic gold - primary accent), #f5e6c8 (warm white text), #0a0a0a (dark background). Secondary accents: #8b6914 (deep gold), #3b82f6 (blue), #22c55e (green)
+- STYLE: Documentary cinematic aesthetic — prefer dark backgrounds (#0a0a0a, #111111), serif fonts (Georgia) for titles, gold (#D4AF37) for accents and highlights, slow/deliberate pacing, subtle camera movements
+- Branding: Use "APRT Media" as credit/watermark text when appropriate (intros, outros)
+- Make it visually engaging with deliberate, cinematic pacing — favor slow reveals and fade transitions over fast jump cuts
 
 IMPORTANT - ADD CAMERA MOVEMENTS to make scenes dynamic:
 - ADD "camera" to at least 2-3 scenes (especially title, stats, and media scenes)
@@ -7642,6 +7977,47 @@ const server = http.createServer(async (req, res) => {
   const url = new URL(req.url, `http://localhost:${PORT}`);
   const path = url.pathname;
 
+  // Font serving route — serves creator fonts from local library
+  if (req.method === 'GET' && path.startsWith('/fonts/')) {
+    const fontPath = decodeURIComponent(path.substring(7)); // Remove '/fonts/'
+    const fullPath = join(FONTS_DIR, fontPath);
+
+    // Security: ensure resolved path stays within FONTS_DIR
+    const resolved = resolve(fullPath);
+    if (!resolved.startsWith(resolve(FONTS_DIR))) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Access denied' }));
+      return;
+    }
+
+    if (!existsSync(resolved)) {
+      res.writeHead(404, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ error: 'Font not found' }));
+      return;
+    }
+
+    const ext = resolved.split('.').pop()?.toLowerCase();
+    const mimeTypes = { otf: 'font/otf', ttf: 'font/ttf', woff: 'font/woff', woff2: 'font/woff2' };
+    const contentType = mimeTypes[ext] || 'application/octet-stream';
+
+    res.writeHead(200, {
+      'Content-Type': contentType,
+      'Cache-Control': 'public, max-age=86400',
+    });
+    createReadStream(resolved).pipe(res);
+    return;
+  }
+
+  // Local asset library routes (non-session)
+  if (req.method === 'GET' && path.startsWith('/local-library/browse')) {
+    await handleLibraryBrowse(req, res, url);
+    return;
+  }
+  if (req.method === 'GET' && path.startsWith('/local-library/thumbnail')) {
+    await handleLibraryThumbnail(req, res, url);
+    return;
+  }
+
   // Session-based routes (new efficient API)
   const sessionMatch = path.match(/^\/session\/([^/]+)(\/(.+))?$/);
   if (sessionMatch) {
@@ -7768,6 +8144,10 @@ const server = http.createServer(async (req, res) => {
     // Remove video background (DiCaprio agent - Bria)
     else if (req.method === 'POST' && action === 'remove-video-bg') {
       await handleRemoveVideoBg(req, res, sessionId);
+    }
+    // Import from local asset library
+    else if (req.method === 'POST' && action === 'import-from-library') {
+      await handleImportFromLibrary(req, res, sessionId);
     }
     // GIPHY search endpoints
     else if (req.method === 'GET' && action === 'giphy/search') {

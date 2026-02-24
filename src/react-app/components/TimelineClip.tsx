@@ -170,12 +170,12 @@ export default function TimelineClip({
       onMouseDown={handleMouseDown}
       className={`absolute rounded-md bg-gradient-to-r ${colorClass} ${
         isDragging
-          ? 'opacity-80 scale-105 shadow-xl shadow-black/50 z-30 cursor-grabbing ring-2 ring-orange-400'
+          ? 'opacity-80 scale-105 shadow-xl shadow-black/50 z-30 cursor-grabbing ring-2 ring-yellow-400'
           : isResizingLeft || isResizingRight
-            ? 'cursor-ew-resize z-20 ring-2 ring-orange-400'
+            ? 'cursor-ew-resize z-20 ring-2 ring-yellow-400'
             : isSelected
-              ? 'ring-2 ring-orange-400 shadow-lg shadow-orange-500/30 z-20 cursor-grab'
-              : 'ring-1 ring-orange-500/50 hover:ring-orange-400 z-10 cursor-grab'
+              ? 'ring-2 ring-yellow-400 shadow-lg shadow-yellow-500/30 z-20 cursor-grab'
+              : 'ring-1 ring-yellow-500/50 hover:ring-yellow-400 z-10 cursor-grab'
       } transition-all duration-75`}
       style={{
         left: `${left}px`,
@@ -184,15 +184,15 @@ export default function TimelineClip({
         height: `${trackHeight - 8}px`,
       }}
     >
-      {/* Left edge indicator - prominent orange line showing cut point */}
-      <div className="absolute left-0 top-0 bottom-0 w-1 bg-orange-500 rounded-l-md shadow-[0_0_4px_rgba(249,115,22,0.6)]" />
+      {/* Left edge indicator - prominent gold line showing cut point */}
+      <div className="absolute left-0 top-0 bottom-0 w-1 bg-yellow-500 rounded-l-md shadow-[0_0_4px_rgba(234,179,8,0.6)]" />
 
-      {/* Right edge indicator - prominent orange line showing cut point */}
-      <div className="absolute right-0 top-0 bottom-0 w-1 bg-orange-500 rounded-r-md shadow-[0_0_4px_rgba(249,115,22,0.6)]" />
+      {/* Right edge indicator - prominent gold line showing cut point */}
+      <div className="absolute right-0 top-0 bottom-0 w-1 bg-yellow-500 rounded-r-md shadow-[0_0_4px_rgba(234,179,8,0.6)]" />
 
       {/* Left resize handle */}
       <div
-        className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-orange-400/30 rounded-l-md z-10"
+        className="absolute left-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-yellow-400/30 rounded-l-md z-10"
         onMouseDown={(e) => {
           e.stopPropagation();
           setIsResizingLeft(true);
@@ -239,7 +239,7 @@ export default function TimelineClip({
 
       {/* Right resize handle */}
       <div
-        className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-orange-400/30 rounded-r-md z-10"
+        className="absolute right-0 top-0 bottom-0 w-2 cursor-ew-resize hover:bg-yellow-400/30 rounded-r-md z-10"
         onMouseDown={(e) => {
           e.stopPropagation();
           setIsResizingRight(true);

@@ -620,15 +620,15 @@ export function useProject() {
 
   // Default caption style
   const defaultCaptionStyle: CaptionStyle = {
-    fontFamily: 'Inter',
-    fontSize: 24,
+    fontFamily: 'Montserrat',
+    fontSize: 28,
     fontWeight: 'bold',
     color: '#FFFFFF',
     strokeColor: '#000000',
-    strokeWidth: 2,
+    strokeWidth: 3,
     position: 'bottom',
     animation: 'karaoke',
-    highlightColor: '#FFD700',
+    highlightColor: '#D4AF37',
   };
 
   // Add caption clip to timeline

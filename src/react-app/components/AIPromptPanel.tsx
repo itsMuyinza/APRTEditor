@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Sparkles, Send, Wand2, Clock, Terminal, CheckCircle, Loader2, VolumeX, FileVideo, Type, Image, Zap, X, Scissors, Plus, Film, Music, MapPin, Timer, ImagePlus, Move } from 'lucide-react';
+import { Sparkles, Send, Wand2, Clock, Terminal, CheckCircle, Loader2, VolumeX, Type, Image, Zap, X, Scissors, Plus, Film, Music, MapPin, Timer, ImagePlus, Mic, Camera } from 'lucide-react';
 import type { TimelineClip, Track, Asset } from '@/react-app/hooks/useProject';
 import { MOTION_TEMPLATES, type TemplateId } from '@/remotion/templates';
 import MotionGraphicsPanel from './MotionGraphicsPanel';
@@ -249,8 +249,8 @@ export default function AIPromptPanel({
   const timeRangePickerRef = useRef<HTMLDivElement>(null);
   const chatEndRef = useRef<HTMLDivElement>(null);
   const [captionOptions, setCaptionOptions] = useState<CaptionOptions>({
-    highlightColor: '#FFD700',
-    fontFamily: 'Inter',
+    highlightColor: '#D4AF37',
+    fontFamily: 'Montserrat',
   });
   const [pendingQuestion, setPendingQuestion] = useState<ClarifyingQuestion | null>(null);
   const [pendingAnimationConcept, setPendingAnimationConcept] = useState<AnimationConcept | null>(null);
@@ -536,22 +536,23 @@ export default function AIPromptPanel({
   };
 
   const FONT_OPTIONS = [
-    'Inter', 'Roboto', 'Poppins', 'Montserrat', 'Oswald', 'Bebas Neue', 'Arial', 'Helvetica'
+    'Coco Gothic', 'Glamor', 'Audrey', 'Balham', 'Tuesday Night', 'Quentin',
+    'Montserrat', 'Inter', 'Roboto', 'Poppins', 'Oswald', 'Bebas Neue', 'Arial', 'Helvetica'
   ];
 
   const suggestions = [
-    { icon: Type, text: 'Add captions' },
+    { icon: Mic, text: 'Add narration captions' },
     { icon: VolumeX, text: 'Remove dead air / silence' },
+    { icon: Film, text: 'Apply film grain overlay' },
+    { icon: Type, text: 'Create documentary title card' },
+    { icon: Image, text: 'Add archival B-roll images' },
     { icon: Wand2, text: 'Remove background noise' },
-    { icon: Clock, text: 'Speed up by 1.5x' },
-    { icon: FileVideo, text: 'Add GIF animations' },
-    { icon: Image, text: 'Add B-roll images' },
+    { icon: Sparkles, text: 'Create APRT intro animation' },
     { icon: Scissors, text: 'Cut at chapters' },
-    { icon: Sparkles, text: 'Create demo animation' },
-    { icon: Zap, text: 'Animate transcript' },
-    { icon: Film, text: 'Add 5 animations' },
-    { icon: Move, text: 'Add Ken Burns zoom effect' },
     { icon: Music, text: 'Extract audio to A1' },
+    { icon: Camera, text: 'Add Ken Burns zoom effect' },
+    { icon: Zap, text: 'Add 5 animations' },
+    { icon: Clock, text: 'Speed up by 1.5x' },
   ];
 
   // Check if prompt is asking for a contextual animation (intro/outro that needs video context)
@@ -1082,6 +1083,23 @@ export default function AIPromptPanel({
       }
       // Otherwise they might want to create one
       return 'create-animation';
+    }
+
+    // Documentary-specific effects (route to FFmpeg)
+    if (lower.includes('film grain') || lower.includes('grain overlay') ||
+        lower.includes('vintage') || lower.includes('sepia') ||
+        lower.includes('letterbox') || lower.includes('cinematic look') ||
+        lower.includes('vignette') || lower.includes('black and white') ||
+        lower.includes('warm tone') || lower.includes('color grade') ||
+        lower.includes('lut') || lower.includes('.cube')) {
+      return 'ffmpeg-edit';
+    }
+
+    // Narration audio enhancement (route to FFmpeg)
+    if ((lower.includes('narration') || lower.includes('voice') || lower.includes('narrator')) &&
+        (lower.includes('enhance') || lower.includes('clarity') || lower.includes('boost') ||
+         lower.includes('clean') || lower.includes('clear'))) {
+      return 'ffmpeg-edit';
     }
 
     // FFmpeg-style video edits (trim, cut, speed, etc.)
@@ -2296,10 +2314,10 @@ export default function AIPromptPanel({
       {/* Header */}
       <div className="p-4 border-b border-zinc-800/50">
         <div className="flex items-center gap-2 mb-2">
-          <div className="w-8 h-8 bg-gradient-to-br from-orange-500 to-amber-500 rounded-lg flex items-center justify-center">
+          <div className="w-8 h-8 bg-gradient-to-br from-yellow-500 to-amber-600 rounded-lg flex items-center justify-center">
             <Sparkles className="w-4 h-4" />
           </div>
-          <h2 className="font-semibold">HyperEdit AI</h2>
+          <h2 className="font-semibold">ClipWise AI</h2>
         </div>
         <p className="text-xs text-zinc-400">
           Describe what you want to do with your video
@@ -2342,18 +2360,18 @@ export default function AIPromptPanel({
 
       {/* Processing overlay */}
       {isApplying && (
-        <div className="p-4 bg-orange-500/10 border-b border-orange-500/20">
+        <div className="p-4 bg-yellow-500/10 border-b border-yellow-500/20">
           <div className="flex items-center gap-3">
-            <Loader2 className="w-5 h-5 text-orange-400 animate-spin" />
+            <Loader2 className="w-5 h-5 text-yellow-400 animate-spin" />
             <div className="flex-1">
-              <p className="text-sm text-orange-200 font-medium">
+              <p className="text-sm text-yellow-200 font-medium">
                 {applyStatus || 'Processing video...'}
               </p>
               {(applyProgress ?? 0) > 0 && (
                 <>
                   <div className="mt-2 h-2 bg-zinc-800 rounded-full overflow-hidden">
                     <div
-                      className="h-full bg-gradient-to-r from-orange-500 to-amber-500 transition-all duration-300"
+                      className="h-full bg-gradient-to-r from-yellow-500 to-amber-600 transition-all duration-300"
                       style={{ width: `${applyProgress}%` }}
                     />
                   </div>
@@ -2371,14 +2389,14 @@ export default function AIPromptPanel({
           <div className="text-center text-sm text-zinc-500 py-8">
             {hasVideo
               ? "No edits yet. Use Quick Actions below to get started!"
-              : 'Upload a video first to start editing with AI'}
+              : 'Drop your footage to start editing. Use Quick Actions to add captions, film grain, and documentary animations.'}
           </div>
         ) : (
           chatHistory.map((message, idx) => (
             <div key={idx} className="space-y-2">
               {message.type === 'user' ? (
                 <div className="flex justify-end">
-                  <div className="bg-gradient-to-r from-orange-500 to-amber-500 rounded-lg px-3 py-2 max-w-[85%]">
+                  <div className="bg-gradient-to-r from-yellow-500 to-amber-600 rounded-lg px-3 py-2 max-w-[85%]">
                     <p className="text-sm text-white">{message.text}</p>
                   </div>
                 </div>
@@ -2398,7 +2416,7 @@ export default function AIPromptPanel({
                           >
                             <span className="text-lg">{option.icon}</span>
                             <div className="flex-1 min-w-0">
-                              <div className="text-sm font-medium text-white group-hover:text-orange-400 transition-colors">
+                              <div className="text-sm font-medium text-white group-hover:text-yellow-400 transition-colors">
                                 {option.label}
                               </div>
                               <div className="text-xs text-zinc-400 mt-0.5">
@@ -2434,7 +2452,7 @@ export default function AIPromptPanel({
 
                     {/* Processing indicator */}
                     {message.isProcessingGifs && (
-                      <div className="mt-2 flex items-center gap-2 text-xs text-orange-400">
+                      <div className="mt-2 flex items-center gap-2 text-xs text-yellow-400">
                         <Loader2 className="w-3 h-3 animate-spin" />
                         <span>Processing...</span>
                       </div>
@@ -2494,7 +2512,7 @@ export default function AIPromptPanel({
                           <Terminal className="w-3 h-3" />
                           <span>FFmpeg Command</span>
                         </div>
-                        <div className="bg-zinc-900 rounded p-2 font-mono text-xs text-orange-400 overflow-x-auto">
+                        <div className="bg-zinc-900 rounded p-2 font-mono text-xs text-yellow-400 overflow-x-auto">
                           {message.command}
                         </div>
                         {message.applied ? (
@@ -2506,7 +2524,7 @@ export default function AIPromptPanel({
                           <button
                             onClick={() => handleApplyEdit(message.command!, idx)}
                             disabled={isApplying || !hasVideo}
-                            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 disabled:from-zinc-700 disabled:to-zinc-700 rounded-lg text-xs font-medium transition-all"
+                            className="w-full flex items-center justify-center gap-2 px-3 py-2 bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-600 hover:to-amber-700 disabled:from-zinc-700 disabled:to-zinc-700 rounded-lg text-xs font-medium transition-all"
                           >
                             {isApplying ? (
                               <>
@@ -2532,7 +2550,7 @@ export default function AIPromptPanel({
         {isProcessing && (
           <div className="bg-zinc-800 rounded-lg p-3">
             <div className="flex items-center gap-2 text-sm text-zinc-400">
-              <div className="w-4 h-4 border-2 border-orange-500/20 border-t-orange-500 rounded-full animate-spin" />
+              <div className="w-4 h-4 border-2 border-yellow-500/20 border-t-yellow-500 rounded-full animate-spin" />
               <span>{processingStatus || 'Thinking...'}</span>
             </div>
           </div>
@@ -2600,7 +2618,7 @@ export default function AIPromptPanel({
           type="button"
           onClick={() => setShowMotionGraphicsModal(true)}
           disabled={!hasVideo || isProcessing}
-          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 mb-2 rounded-lg text-sm font-medium transition-all bg-gradient-to-r from-orange-500/20 to-amber-500/20 hover:from-orange-500/30 hover:to-amber-500/30 text-orange-300 hover:text-orange-200 border border-orange-500/30 hover:border-orange-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
+          className="w-full flex items-center justify-center gap-2 px-4 py-2.5 mb-2 rounded-lg text-sm font-medium transition-all bg-gradient-to-r from-yellow-500/20 to-amber-600/20 hover:from-yellow-500/30 hover:to-amber-600/30 text-yellow-300 hover:text-yellow-200 border border-yellow-500/30 hover:border-yellow-500/50 disabled:opacity-50 disabled:cursor-not-allowed"
         >
           <Wand2 className="w-4 h-4" />
           Motion Graphics
@@ -2614,7 +2632,7 @@ export default function AIPromptPanel({
             disabled={!hasVideo || isProcessing}
             className={`w-full flex items-center justify-center gap-2 px-4 py-2.5 rounded-lg text-sm font-medium transition-all ${
               showQuickActions
-                ? 'bg-orange-500/20 text-orange-400 ring-1 ring-orange-500/50'
+                ? 'bg-yellow-500/20 text-yellow-400 ring-1 ring-yellow-500/50'
                 : 'bg-zinc-800 hover:bg-zinc-700 text-zinc-300 disabled:opacity-50 disabled:cursor-not-allowed'
             }`}
           >
@@ -2637,7 +2655,7 @@ export default function AIPromptPanel({
                     }}
                     className="flex items-center gap-2 px-3 py-2.5 bg-zinc-700/50 hover:bg-zinc-700 rounded-lg text-xs text-left transition-colors group"
                   >
-                    <suggestion.icon className="w-4 h-4 text-zinc-400 group-hover:text-orange-400 transition-colors flex-shrink-0" />
+                    <suggestion.icon className="w-4 h-4 text-zinc-400 group-hover:text-yellow-400 transition-colors flex-shrink-0" />
                     <span className="text-zinc-300 leading-tight">{suggestion.text}</span>
                   </button>
                 ))}
@@ -2667,7 +2685,7 @@ export default function AIPromptPanel({
             {selectedReferences.map((ref, idx) => (
               <div
                 key={idx}
-                className="flex items-center gap-1 px-2 py-1 bg-orange-500/20 text-orange-300 rounded-md text-xs"
+                className="flex items-center gap-1 px-2 py-1 bg-yellow-500/20 text-yellow-300 rounded-md text-xs"
               >
                 {ref.type === 'clip' && <Film className="w-3 h-3" />}
                 {ref.type === 'track' && <Type className="w-3 h-3" />}
@@ -2676,7 +2694,7 @@ export default function AIPromptPanel({
                 <button
                   type="button"
                   onClick={() => removeReference(idx)}
-                  className="ml-0.5 hover:text-orange-100"
+                  className="ml-0.5 hover:text-yellow-100"
                 >
                   <X className="w-3 h-3" />
                 </button>
@@ -2703,7 +2721,7 @@ export default function AIPromptPanel({
         )}
 
         {/* Unified Input Container */}
-        <div className="bg-zinc-800 rounded-xl border border-zinc-700/50 focus-within:ring-2 focus-within:ring-orange-500/50 transition-all">
+        <div className="bg-zinc-800 rounded-xl border border-zinc-700/50 focus-within:ring-2 focus-within:ring-yellow-500/50 transition-all">
           {/* Textarea */}
           <textarea
             value={prompt}
@@ -2731,7 +2749,7 @@ export default function AIPromptPanel({
                   disabled={!hasVideo || isProcessing}
                   className={`p-1.5 rounded-md transition-all ${
                     showReferencePicker
-                      ? 'bg-orange-500/20 text-orange-400'
+                      ? 'bg-yellow-500/20 text-yellow-400'
                       : 'hover:bg-zinc-700 text-zinc-400 hover:text-zinc-300 disabled:opacity-50'
                   }`}
                   title="Add asset from library"
@@ -2812,7 +2830,7 @@ export default function AIPromptPanel({
                                     {asset.type}
                                   </span>
                                   {asset.aiGenerated && (
-                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-orange-500/20 text-orange-300">
+                                    <span className="text-[10px] px-1.5 py-0.5 rounded bg-yellow-500/20 text-yellow-300">
                                       AI
                                     </span>
                                   )}
@@ -2896,7 +2914,7 @@ export default function AIPromptPanel({
                           value={timeRangeInputs.start}
                           onChange={(e) => setTimeRangeInputs(prev => ({ ...prev, start: e.target.value }))}
                           placeholder="0:00"
-                          className="flex-1 px-2 py-1.5 bg-zinc-700 border border-zinc-600 rounded text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-orange-500"
+                          className="flex-1 px-2 py-1.5 bg-zinc-700 border border-zinc-600 rounded text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-yellow-500"
                         />
                       </div>
                       <div className="flex items-center gap-2">
@@ -2906,7 +2924,7 @@ export default function AIPromptPanel({
                           value={timeRangeInputs.end}
                           onChange={(e) => setTimeRangeInputs(prev => ({ ...prev, end: e.target.value }))}
                           placeholder="1:30"
-                          className="flex-1 px-2 py-1.5 bg-zinc-700 border border-zinc-600 rounded text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-orange-500"
+                          className="flex-1 px-2 py-1.5 bg-zinc-700 border border-zinc-600 rounded text-xs text-white placeholder:text-zinc-500 focus:outline-none focus:ring-1 focus:ring-yellow-500"
                         />
                       </div>
                     </div>
@@ -2928,7 +2946,7 @@ export default function AIPromptPanel({
                       <button
                         type="button"
                         onClick={applyTimeRange}
-                        className="flex-1 px-2 py-1.5 bg-orange-500 hover:bg-orange-600 rounded text-xs text-white font-medium transition-colors"
+                        className="flex-1 px-2 py-1.5 bg-yellow-500 hover:bg-yellow-600 rounded text-xs text-white font-medium transition-colors"
                       >
                         Apply
                       </button>
@@ -2946,7 +2964,7 @@ export default function AIPromptPanel({
             <button
               type="submit"
               disabled={!prompt.trim() || isProcessing || !hasVideo}
-              className="w-8 h-8 bg-gradient-to-r from-orange-500 to-amber-500 disabled:from-zinc-700 disabled:to-zinc-700 rounded-lg flex items-center justify-center transition-all hover:shadow-lg hover:shadow-orange-500/50 disabled:shadow-none"
+              className="w-8 h-8 bg-gradient-to-r from-yellow-500 to-amber-600 disabled:from-zinc-700 disabled:to-zinc-700 rounded-lg flex items-center justify-center transition-all hover:shadow-lg hover:shadow-yellow-500/50 disabled:shadow-none"
             >
               {isProcessing ? (
                 <div className="w-4 h-4 border-2 border-white/20 border-t-white rounded-full animate-spin" />

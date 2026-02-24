@@ -9,6 +9,8 @@ export { ProgressBar, type ProgressBarProps } from './ProgressBar';
 export { Comparison, type ComparisonProps } from './Comparison';
 export { ZoomPan, type ZoomPanProps } from './ZoomPan';
 export { DataChart, type DataChartProps } from './DataChart';
+export { DocLowerThird, type DocLowerThirdProps } from './DocLowerThird';
+export { DocTitleCard, type DocTitleCardProps } from './DocTitleCard';
 
 // Template registry for easy lookup
 export const MOTION_TEMPLATES = {
@@ -31,10 +33,10 @@ export const MOTION_TEMPLATES = {
     component: 'LowerThird',
     category: 'text',
     defaultProps: {
-      name: 'John Doe',
-      title: 'CEO & Founder',
+      name: 'Muyinza',
+      title: 'APRT Media',
       style: 'modern',
-      primaryColor: '#f97316',
+      primaryColor: '#D4AF37',
     },
     styles: ['modern', 'minimal', 'bold', 'gradient', 'news'],
   },
@@ -63,7 +65,7 @@ export const MOTION_TEMPLATES = {
       suffix: '+',
       label: 'Active Users',
       style: 'simple',
-      color: '#f97316',
+      color: '#D4AF37',
       fontSize: 120,
     },
     styles: ['simple', 'card', 'gradient', 'neon', 'minimal'],
@@ -74,10 +76,10 @@ export const MOTION_TEMPLATES = {
     component: 'LogoReveal',
     category: 'branding',
     defaultProps: {
-      logoText: 'LOGO',
-      tagline: 'Your tagline here',
+      logoText: 'APRT',
+      tagline: 'APRT Media',
       style: 'scale',
-      color: '#ffffff',
+      color: '#D4AF37',
     },
     styles: ['fade', 'scale', 'slide', 'glitch', 'particles'],
   },
@@ -107,7 +109,7 @@ export const MOTION_TEMPLATES = {
       author: 'Jane Doe',
       role: 'CEO, Company',
       style: 'card',
-      color: '#f97316',
+      color: '#D4AF37',
     },
     styles: ['card', 'minimal', 'gradient', 'glass'],
     types: ['testimonial', 'rating', 'stats', 'logos'],
@@ -122,7 +124,7 @@ export const MOTION_TEMPLATES = {
       label: 'Project Progress',
       showPercentage: true,
       style: 'linear',
-      color: '#f97316',
+      color: '#D4AF37',
     },
     styles: ['linear', 'circular', 'steps', 'gradient', 'neon'],
   },
@@ -164,12 +166,39 @@ export const MOTION_TEMPLATES = {
       type: 'bar',
       title: 'Monthly Revenue',
       style: 'minimal',
-      color: '#f97316',
+      color: '#D4AF37',
       showValues: true,
       showLabels: true,
     },
     styles: ['minimal', 'gradient', 'neon', 'glass'],
     types: ['bar', 'line', 'pie', 'donut'],
+  },
+  'doc-lower-third': {
+    name: 'Documentary Lower Third',
+    description: 'Cinematic name overlay for documentaries',
+    component: 'DocLowerThird',
+    category: 'documentary',
+    defaultProps: {
+      name: 'Muyinza',
+      title: 'Host / APRT Media',
+      style: 'documentary',
+      primaryColor: '#D4AF37',
+    },
+    styles: ['documentary', 'archive', 'narrator'],
+  },
+  'doc-title-card': {
+    name: 'Documentary Title Card',
+    description: 'Full-screen chapter or section title',
+    component: 'DocTitleCard',
+    category: 'documentary',
+    defaultProps: {
+      title: 'Chapter Title',
+      subtitle: 'The Era of Change, 1988-1996',
+      credit: 'APRT Media',
+      style: 'cinematic',
+      primaryColor: '#D4AF37',
+    },
+    styles: ['cinematic', 'era', 'minimal'],
   },
 } as const;
 
@@ -200,5 +229,9 @@ export const TEMPLATE_CATEGORIES = {
   showcase: {
     name: 'Showcase',
     templates: ['comparison', 'zoom-pan'],
+  },
+  documentary: {
+    name: 'Documentary',
+    templates: ['doc-lower-third', 'doc-title-card'],
   },
 } as const;

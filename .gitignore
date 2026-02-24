@@ -2,4 +2,5 @@ dist/
 node_modules/
 .wrangler/
 .dev.vars
+.venv/
 worker-configuration.d.ts

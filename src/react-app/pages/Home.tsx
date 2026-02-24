@@ -2,6 +2,7 @@ import { useState, useCallback, useRef, useEffect, useMemo } from 'react';
 import VideoPreview, { VideoPreviewHandle } from '@/react-app/components/VideoPreview';
 import Timeline from '@/react-app/components/Timeline';
 import AssetLibrary from '@/react-app/components/AssetLibrary';
+import LocalAssetBrowser from '@/react-app/components/LocalAssetBrowser';
 import ClipPropertiesPanel from '@/react-app/components/ClipPropertiesPanel';
 import CaptionPropertiesPanel from '@/react-app/components/CaptionPropertiesPanel';
 import AIPromptPanel from '@/react-app/components/AIPromptPanel';
@@ -13,7 +14,7 @@ import ResizableVerticalPanel from '@/react-app/components/ResizableVerticalPane
 import TimelineTabs from '@/react-app/components/TimelineTabs';
 import { useProject, Asset, TimelineClip, CaptionStyle } from '@/react-app/hooks/useProject';
 import { useVideoSession } from '@/react-app/hooks/useVideoSession';
-import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film } from 'lucide-react';
+import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film, FolderOpen, Package } from 'lucide-react';
 import type { TemplateId } from '@/remotion/templates';
 
 interface ChapterData {
@@ -35,6 +36,7 @@ export default function Home() {
   const [autoSnap, setAutoSnap] = useState(true); // Ripple delete mode - shift clips when deleting
   const [activeAgent, setActiveAgent] = useState<'director' | 'picasso' | 'dicaprio'>('director');
   const [showGifSearch, setShowGifSearch] = useState(false);
+  const [libraryTab, setLibraryTab] = useState<'project' | 'library'>('project');
 
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
@@ -1639,11 +1641,11 @@ export default function Home() {
       <header className="flex items-center justify-between px-6 py-3 bg-zinc-900/50 border-b border-zinc-800/50 backdrop-blur-sm">
         <div className="flex items-center gap-3">
           <div className="flex items-center gap-2">
-            <div className="w-8 h-8 bg-gradient-to-br from-orange-500 to-amber-500 rounded-lg flex items-center justify-center">
+            <div className="w-8 h-8 bg-gradient-to-br from-yellow-500 to-amber-600 rounded-lg flex items-center justify-center">
               <Sparkles className="w-5 h-5" />
             </div>
-            <h1 className="text-xl font-bold bg-gradient-to-r from-orange-400 to-amber-400 bg-clip-text text-transparent">
-              HyperEdit
+            <h1 className="text-xl font-bold bg-gradient-to-r from-yellow-400 to-amber-400 bg-clip-text text-transparent">
+              ClipWise
             </h1>
           </div>
           {currentStatus && (
@@ -1675,7 +1677,7 @@ export default function Home() {
               )}
             </>
           )}
-          <button className="px-4 py-2 bg-gradient-to-r from-orange-500 to-amber-500 hover:from-orange-600 hover:to-amber-600 rounded-lg text-sm font-medium transition-all">
+          <button className="px-4 py-2 bg-gradient-to-r from-yellow-500 to-amber-600 hover:from-yellow-600 hover:to-amber-700 rounded-lg text-sm font-medium transition-all">
             AI Edit
           </button>
         </div>
@@ -1702,7 +1704,7 @@ export default function Home() {
           <div className="bg-zinc-900 rounded-xl border border-zinc-700 max-w-lg w-full max-h-[80vh] overflow-hidden flex flex-col">
             <div className="flex items-center justify-between p-4 border-b border-zinc-700">
               <h2 className="text-lg font-semibold flex items-center gap-2">
-                <ListOrdered className="w-5 h-5 text-orange-400" />
+                <ListOrdered className="w-5 h-5 text-yellow-400" />
                 YouTube Chapters
               </h2>
               <button
@@ -1744,7 +1746,7 @@ export default function Home() {
             <div className="p-4 border-t border-zinc-700 flex gap-2">
               <button
                 onClick={handleCopyChapters}
-                className="flex-1 px-4 py-2 bg-orange-600 hover:bg-orange-500 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
+                className="flex-1 px-4 py-2 bg-yellow-600 hover:bg-yellow-500 rounded-lg text-sm font-medium transition-colors flex items-center justify-center gap-2"
               >
                 {copied ? (
                   <>
@@ -1778,18 +1780,57 @@ export default function Home() {
           side="left"
         >
           <div className="flex flex-col h-full">
-            {/* Asset Library */}
-            <div className={`${selectedClipId ? 'h-1/2' : 'h-full'} overflow-hidden`}>
-              <AssetLibrary
-                assets={assets}
-                onUpload={handleAssetUpload}
-                onDelete={deleteAsset}
-                onDragStart={handleAssetDragStart}
-                onSelect={handleAssetSelect}
-                selectedAssetId={selectedAssetId}
-                uploading={loading}
-                onOpenGifSearch={() => setShowGifSearch(true)}
-              />
+            {/* Asset Library / My Library toggle */}
+            <div className={`${selectedClipId ? 'h-1/2' : 'h-full'} overflow-hidden flex flex-col`}>
+              {/* Tab switcher */}
+              <div className="flex border-b border-zinc-800/50 bg-zinc-900/30 flex-shrink-0">
+                <button
+                  onClick={() => setLibraryTab('project')}
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-[10px] font-medium transition-colors ${
+                    libraryTab === 'project'
+                      ? 'text-yellow-400 border-b-2 border-yellow-500'
+                      : 'text-zinc-500 hover:text-zinc-300'
+                  }`}
+                >
+                  <Package className="w-3 h-3" />
+                  Project
+                </button>
+                <button
+                  onClick={() => setLibraryTab('library')}
+                  className={`flex-1 flex items-center justify-center gap-1.5 px-2 py-1.5 text-[10px] font-medium transition-colors ${
+                    libraryTab === 'library'
+                      ? 'text-yellow-400 border-b-2 border-yellow-500'
+                      : 'text-zinc-500 hover:text-zinc-300'
+                  }`}
+                >
+                  <FolderOpen className="w-3 h-3" />
+                  My Library
+                </button>
+              </div>
+
+              {/* Tab content */}
+              <div className="flex-1 overflow-hidden">
+                {libraryTab === 'project' ? (
+                  <AssetLibrary
+                    assets={assets}
+                    onUpload={handleAssetUpload}
+                    onDelete={deleteAsset}
+                    onDragStart={handleAssetDragStart}
+                    onSelect={handleAssetSelect}
+                    selectedAssetId={selectedAssetId}
+                    uploading={loading}
+                    onOpenGifSearch={() => setShowGifSearch(true)}
+                  />
+                ) : (
+                  <LocalAssetBrowser
+                    sessionId={session?.sessionId ?? null}
+                    onImportComplete={async () => {
+                      await refreshAssets();
+                      setLibraryTab('project'); // Switch to project tab to see imported asset
+                    }}
+                  />
+                )}
+              </div>
             </div>
 
             {/* Clip/Caption Properties Panel (shown when clip is selected) */}
@@ -1895,7 +1936,7 @@ export default function Home() {
                 onClick={() => setActiveAgent('director')}
                 className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
                   activeAgent === 'director'
-                    ? 'text-orange-500 border-b-2 border-orange-500 bg-zinc-800/30'
+                    ? 'text-yellow-500 border-b-2 border-yellow-500 bg-zinc-800/30'
                     : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
                 }`}
               >
@@ -1906,7 +1947,7 @@ export default function Home() {
                 onClick={() => setActiveAgent('picasso')}
                 className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
                   activeAgent === 'picasso'
-                    ? 'text-orange-300 border-b-2 border-orange-300 bg-zinc-800/30'
+                    ? 'text-yellow-300 border-b-2 border-yellow-300 bg-zinc-800/30'
                     : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
                 }`}
               >

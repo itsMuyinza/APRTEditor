@@ -1,0 +1,74 @@
+/* Creator fonts served from local FFmpeg server (/fonts/ route)
+   These map to files in: Video Work Folder/Transitions - Titles - Motion GFX/Fonts/ */
+
+@font-face {
+  font-family: 'Coco Gothic';
+  src: url('http://localhost:3333/fonts/coco_gothic/CocoGothic_trial.ttf') format('truetype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Coco Gothic';
+  src: url('http://localhost:3333/fonts/coco_gothic/CocoGothic-Bold_trial.ttf') format('truetype');
+  font-weight: bold;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Glamor';
+  src: url('http://localhost:3333/fonts/Glamor%20-%20OTF/Glamor-Regular.otf') format('opentype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Glamor';
+  src: url('http://localhost:3333/fonts/Glamor%20-%20OTF/Glamor-Bold.otf') format('opentype');
+  font-weight: bold;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Audrey';
+  src: url('http://localhost:3333/fonts/Audrey/Audrey-Bold.otf') format('opentype');
+  font-weight: bold;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Audrey';
+  src: url('http://localhost:3333/fonts/Audrey/Audrey-Normal.otf') format('opentype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Balham';
+  src: url('http://localhost:3333/fonts/Balham.otf') format('opentype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Tuesday Night';
+  src: url('http://localhost:3333/fonts/TuesdayNight/TuesdayNight-Regular.otf') format('opentype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
+
+@font-face {
+  font-family: 'Quentin';
+  src: url('http://localhost:3333/fonts/Quentin.otf') format('opentype');
+  font-weight: normal;
+  font-style: normal;
+  font-display: swap;
+}
