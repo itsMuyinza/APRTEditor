@@ -11,6 +11,7 @@ export { ZoomPan, type ZoomPanProps } from './ZoomPan';
 export { DataChart, type DataChartProps } from './DataChart';
 export { DocLowerThird, type DocLowerThirdProps } from './DocLowerThird';
 export { DocTitleCard, type DocTitleCardProps } from './DocTitleCard';
+export { ScribbleLowerThird, type ScribbleLowerThirdProps } from './ScribbleLowerThird';
 
 // Template registry for easy lookup
 export const MOTION_TEMPLATES = {
@@ -200,6 +201,19 @@ export const MOTION_TEMPLATES = {
     },
     styles: ['cinematic', 'era', 'minimal'],
   },
+  'scribble-lower-third': {
+    name: 'Scribble Lower Third',
+    description: 'Hand-drawn scribble-style name overlay',
+    component: 'ScribbleLowerThird',
+    category: 'documentary',
+    defaultProps: {
+      name: 'Muyinza',
+      title: 'APRT Media',
+      scribbleStyle: 'underline',
+      primaryColor: '#D4AF37',
+    },
+    styles: ['underline', 'circle', 'bracket'],
+  },
 } as const;
 
 export type TemplateId = keyof typeof MOTION_TEMPLATES;
@@ -232,6 +246,6 @@ export const TEMPLATE_CATEGORIES = {
   },
   documentary: {
     name: 'Documentary',
-    templates: ['doc-lower-third', 'doc-title-card'],
+    templates: ['doc-lower-third', 'doc-title-card', 'scribble-lower-third'],
   },
 } as const;

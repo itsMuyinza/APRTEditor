@@ -172,6 +172,48 @@ export function useProject() {
   useEffect(() => { clipsRef.current = clips; }, [clips]);
   useEffect(() => { settingsRef.current = settings; }, [settings]);
 
+  // ── Undo / Redo (snapshot-based, capped at 50) ──
+  type UndoSnapshot = { clips: TimelineClip[]; captionData: Record<string, CaptionData> };
+  const undoStackRef = useRef<UndoSnapshot[]>([]);
+  const redoStackRef = useRef<UndoSnapshot[]>([]);
+  const MAX_UNDO = 50;
+
+  const pushUndoSnapshot = useCallback(() => {
+    undoStackRef.current.push({
+      clips: structuredClone(clipsRef.current),
+      captionData: structuredClone(captionData),
+    });
+    if (undoStackRef.current.length > MAX_UNDO) {
+      undoStackRef.current.shift();
+    }
+    // Any new action clears the redo stack
+    redoStackRef.current = [];
+  }, [captionData]);
+
+  const undo = useCallback(() => {
+    const snapshot = undoStackRef.current.pop();
+    if (!snapshot) return;
+    // Push current state onto redo stack
+    redoStackRef.current.push({
+      clips: structuredClone(clipsRef.current),
+      captionData: structuredClone(captionData),
+    });
+    setClips(snapshot.clips);
+    setCaptionData(snapshot.captionData);
+  }, [captionData]);
+
+  const redo = useCallback(() => {
+    const snapshot = redoStackRef.current.pop();
+    if (!snapshot) return;
+    // Push current state onto undo stack
+    undoStackRef.current.push({
+      clips: structuredClone(clipsRef.current),
+      captionData: structuredClone(captionData),
+    });
+    setClips(snapshot.clips);
+    setCaptionData(snapshot.captionData);
+  }, [captionData]);
+
   // Wrapper to persist session to localStorage
   const setSession = useCallback((sessionOrUpdater: SessionInfo | null | ((prev: SessionInfo | null) => SessionInfo | null)) => {
     setSessionInternal(prev => {
@@ -403,9 +445,10 @@ export function useProject() {
       outPoint: outPoint ?? clipDuration,
     };
 
+    pushUndoSnapshot();
     setClips(prev => [...prev, clip]);
     return clip;
-  }, [assets]);
+  }, [assets, pushUndoSnapshot]);
 
   // Update clip
   const updateClip = useCallback((clipId: string, updates: Partial<TimelineClip>): void => {
@@ -416,6 +459,7 @@ export function useProject() {
 
   // Delete clip (with optional ripple/autosnap to shift subsequent clips)
   const deleteClip = useCallback((clipId: string, ripple: boolean = false): void => {
+    pushUndoSnapshot();
     setClips(prev => {
       const clipToDelete = prev.find(c => c.id === clipId);
       if (!clipToDelete) return prev.filter(c => c.id !== clipId);
@@ -440,10 +484,11 @@ export function useProject() {
         return c;
       });
     });
-  }, []);
+  }, [pushUndoSnapshot]);
 
   // Move clip
   const moveClip = useCallback((clipId: string, newStart: number, newTrackId?: string): void => {
+    pushUndoSnapshot();
     setClips(prev => prev.map(c => {
       if (c.id !== clipId) return c;
       return {
@@ -452,10 +497,11 @@ export function useProject() {
         trackId: newTrackId ?? c.trackId,
       };
     }));
-  }, []);
+  }, [pushUndoSnapshot]);
 
   // Resize clip (change in/out points or duration)
   const resizeClip = useCallback((clipId: string, newInPoint: number, newOutPoint: number): void => {
+    pushUndoSnapshot();
     setClips(prev => prev.map(c => {
       if (c.id !== clipId) return c;
       const newDuration = newOutPoint - newInPoint;
@@ -466,7 +512,7 @@ export function useProject() {
         duration: newDuration,
       };
     }));
-  }, []);
+  }, [pushUndoSnapshot]);
 
   // Split clip at a specific time, creating two clips
   const splitClip = useCallback((clipId: string, splitTime: number): string | null => {
@@ -497,6 +543,7 @@ export function useProject() {
     };
 
     // Update the first clip (before the split) and add the second clip
+    pushUndoSnapshot();
     setClips(prev => [
       ...prev.map(c => {
         if (c.id !== clipId) return c;
@@ -510,7 +557,7 @@ export function useProject() {
     ]);
 
     return secondClip.id;
-  }, [clips]);
+  }, [clips, pushUndoSnapshot]);
 
   // Create a new timeline tab for editing a clip/animation in isolation
   const createTimelineTab = useCallback((name: string, assetId: string, initialClips?: TimelineClip[]): string => {
@@ -804,11 +851,20 @@ export function useProject() {
 
   // Render project
   // Uses refs to always get latest state
-  const renderProject = useCallback(async (preview = false): Promise<string> => {
+  const renderProject = useCallback(async (
+    preview = false,
+    overrideSettings?: {
+      outputWidth?: number;
+      outputHeight?: number;
+      cropMode?: 'center' | 'subject-track';
+      outputFilename?: string;
+      renderLabel?: string;
+    },
+  ): Promise<string> => {
     if (!session) throw new Error('No session');
 
     setLoading(true);
-    setStatus(preview ? 'Rendering preview...' : 'Rendering export...');
+    setStatus(preview ? 'Rendering preview...' : `Rendering ${overrideSettings?.renderLabel || 'export'}...`);
 
     try {
       // Save project first - use refs to get latest state
@@ -825,7 +881,10 @@ export function useProject() {
       const response = await fetch(`${LOCAL_FFMPEG_URL}/session/${session.sessionId}/render`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ preview }),
+        body: JSON.stringify({
+          preview,
+          ...overrideSettings,
+        }),
       });
 
       if (!response.ok) {
@@ -836,7 +895,10 @@ export function useProject() {
       const result = await response.json();
       setStatus('Render complete!');
 
-      // Return download URL
+      // If a specific output filename was requested, return its direct download URL
+      if (result.outputFilename && result.outputFilename !== 'preview.mp4') {
+        return `${LOCAL_FFMPEG_URL}/session/${session.sessionId}/renders/${result.outputFilename}`;
+      }
       return `${LOCAL_FFMPEG_URL}${result.downloadUrl}`;
     } finally {
       setLoading(false);
@@ -969,6 +1031,10 @@ export function useProject() {
     loadProject,
     renderProject,
     getDuration,
+
+    // Undo / Redo
+    undo,
+    redo,
 
     // Setters for direct state manipulation
     setTracks,

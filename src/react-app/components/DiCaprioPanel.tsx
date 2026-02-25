@@ -50,10 +50,10 @@ const SKILLS = [
 ];
 
 const QUICK_ACTIONS = [
-  { icon: Play, text: 'Animate archival photo with slow zoom' },
-  { icon: Wand2, text: 'Apply documentary film grade style' },
+  { icon: Play, text: 'Animate archival photo with slow Ken Burns zoom and film grain' },
+  { icon: Wand2, text: 'Apply warm cinematic documentary grade with golden highlights' },
   { icon: Eraser, text: 'Remove video background' },
-  { icon: Film, text: 'Add gentle camera pan movement' },
+  { icon: Film, text: 'Add gentle camera pan with slight film shake' },
 ];
 
 export default function DiCaprioPanel({

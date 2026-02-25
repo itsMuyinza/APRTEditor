@@ -2,7 +2,7 @@ import { useState } from 'react';
 import { Player } from '@remotion/player';
 import {
   Wand2, Type, User, Bell, ChevronRight, Hash, Sparkles,
-  Monitor, MessageSquare, TrendingUp, GitCompare, Move, PieChart, BookOpen, Clapperboard
+  Monitor, MessageSquare, TrendingUp, GitCompare, Move, PieChart, BookOpen, Clapperboard, PenTool
 } from 'lucide-react';
 import {
   AnimatedText,
@@ -18,6 +18,7 @@ import {
   DataChart,
   DocLowerThird,
   DocTitleCard,
+  ScribbleLowerThird,
   MOTION_TEMPLATES,
   TEMPLATE_CATEGORIES,
   type TemplateId,
@@ -41,6 +42,7 @@ const templateIcons: Record<TemplateId, React.ComponentType<{ className?: string
   'data-chart': PieChart,
   'doc-lower-third': BookOpen,
   'doc-title-card': Clapperboard,
+  'scribble-lower-third': PenTool,
 };
 
 const componentMap: Record<TemplateId, React.ComponentType<Record<string, unknown>>> = {
@@ -57,6 +59,7 @@ const componentMap: Record<TemplateId, React.ComponentType<Record<string, unknow
   'data-chart': DataChart as unknown as React.ComponentType<Record<string, unknown>>,
   'doc-lower-third': DocLowerThird as unknown as React.ComponentType<Record<string, unknown>>,
   'doc-title-card': DocTitleCard as unknown as React.ComponentType<Record<string, unknown>>,
+  'scribble-lower-third': ScribbleLowerThird as unknown as React.ComponentType<Record<string, unknown>>,
 };
 
 export default function MotionGraphicsPanel({ onAddToTimeline }: MotionGraphicsPanelProps) {

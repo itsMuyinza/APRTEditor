@@ -55,6 +55,82 @@ const LIBRARY_CATEGORIES = {
 // Active video sessions - keeps videos on disk between edits
 const sessions = new Map();
 
+// ── Job Registry (Processing View) ──────────────────────────────────
+// Tracks all active/recent jobs per session for real-time progress UI
+// Each job: { id, sessionId, type, status, progress, description, assetId, startedAt, completedAt, error }
+const activeJobs = new Map(); // jobId → job object
+const jobSSEClients = new Map(); // sessionId → Set<res> (SSE connections)
+
+function registerJob(sessionId, jobId, type, description, assetId = null) {
+  const job = {
+    id: jobId,
+    sessionId,
+    type,       // 'ffmpeg-edit' | 'render' | 'transcribe' | 'generate-image' | 'generate-video' | 'remove-dead-air' | 'generate-animation' | 'restyle-video' | 'remove-bg' | 'create-gif' | 'extract-audio'
+    status: 'processing', // 'processing' | 'complete' | 'error'
+    progress: 0,          // 0-100
+    description,
+    assetId,
+    startedAt: Date.now(),
+    completedAt: null,
+    error: null,
+  };
+  activeJobs.set(jobId, job);
+  broadcastJobUpdate(sessionId, job);
+  return job;
+}
+
+function updateJobProgress(jobId, progress, description) {
+  const job = activeJobs.get(jobId);
+  if (!job) return;
+  job.progress = Math.min(100, Math.max(0, progress));
+  if (description) job.description = description;
+  broadcastJobUpdate(job.sessionId, job);
+}
+
+function completeJob(jobId, result) {
+  const job = activeJobs.get(jobId);
+  if (!job) return;
+  job.status = 'complete';
+  job.progress = 100;
+  job.completedAt = Date.now();
+  if (result) job.result = result;
+  broadcastJobUpdate(job.sessionId, job);
+  // Clean up after 60 seconds so the UI can show the "complete" state briefly
+  setTimeout(() => activeJobs.delete(jobId), 60000);
+}
+
+function failJob(jobId, error) {
+  const job = activeJobs.get(jobId);
+  if (!job) return;
+  job.status = 'error';
+  job.error = typeof error === 'string' ? error : error?.message || 'Unknown error';
+  job.completedAt = Date.now();
+  broadcastJobUpdate(job.sessionId, job);
+  setTimeout(() => activeJobs.delete(jobId), 60000);
+}
+
+function broadcastJobUpdate(sessionId, job) {
+  const clients = jobSSEClients.get(sessionId);
+  if (!clients || clients.size === 0) return;
+  const data = JSON.stringify(job);
+  for (const client of clients) {
+    try {
+      client.write(`data: ${data}\n\n`);
+    } catch (e) {
+      clients.delete(client);
+    }
+  }
+}
+
+function getSessionJobs(sessionId) {
+  const jobs = [];
+  for (const job of activeJobs.values()) {
+    if (job.sessionId === sessionId) jobs.push(job);
+  }
+  return jobs.sort((a, b) => b.startedAt - a.startedAt);
+}
+// ─────────────────────────────────────────────────────────────────────
+
 // Ensure temp directories exist
 if (!existsSync(TEMP_DIR)) {
   mkdirSync(TEMP_DIR, { recursive: true });
@@ -310,10 +386,12 @@ setInterval(() => {
 }, 30 * 60 * 1000); // Check every 30 minutes
 
 // Run FFmpeg command and return a promise
-function runFFmpeg(args, jobId) {
+// Options: { durationSec, registeredJobId } — if provided, emits progress to job registry
+function runFFmpeg(args, jobId, options = {}) {
   return new Promise((resolve, reject) => {
     const ffmpeg = spawn('ffmpeg', args);
     let stderr = '';
+    const { durationSec, registeredJobId } = options;
 
     ffmpeg.stderr.on('data', (data) => {
       stderr += data.toString();
@@ -321,6 +399,15 @@ function runFFmpeg(args, jobId) {
       for (const line of lines) {
         if (line.includes('time=') || line.includes('frame=')) {
           process.stdout.write(`\r[${jobId}] ${line.trim()}`);
+          // Parse time= for progress tracking
+          if (registeredJobId && durationSec) {
+            const timeMatch = line.match(/time=(\d{2}):(\d{2}):(\d{2})\.(\d{2})/);
+            if (timeMatch) {
+              const elapsed = parseInt(timeMatch[1]) * 3600 + parseInt(timeMatch[2]) * 60 + parseInt(timeMatch[3]) + parseInt(timeMatch[4]) / 100;
+              const progress = Math.min(99, Math.round((elapsed / durationSec) * 100));
+              updateJobProgress(registeredJobId, progress);
+            }
+          }
         }
       }
     });
@@ -1321,6 +1408,281 @@ async function handleSessionRemoveDeadAir(req, res, sessionId) {
   }
 }
 
+// ── Cut Repeated Lines (Gemini-powered) ──────────────────────────────
+// Analyzes Whisper transcript, identifies repeated takes via Gemini,
+// keeps only the last (best) take of each repeated phrase, and
+// rebuilds the video using the same segment-extract + concat pipeline
+// as dead air removal.
+async function handleCutRepeatedLines(req, res, sessionId) {
+  const session = getSession(sessionId);
+  if (!session) {
+    res.writeHead(404, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: 'Session not found' }));
+    return;
+  }
+
+  const jobId = randomUUID();
+  const outputPath = join(session.dir, `cutrepeats-output-${Date.now()}.mp4`);
+  const concatListPath = join(session.dir, `cutrepeats-concat-${Date.now()}.txt`);
+  const segmentPaths = [];
+
+  try {
+    // Parse request body
+    let body = '';
+    for await (const chunk of req) body += chunk;
+    const options = body ? JSON.parse(body) : {};
+
+    const geminiKey = process.env.GEMINI_API_KEY;
+    if (!geminiKey) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'GEMINI_API_KEY required for cut repeated lines. Set it in .dev.vars' }));
+      return;
+    }
+
+    // Find the video asset (prefer specified assetId, then non-AI-generated, then any)
+    let videoAsset = null;
+    if (options.assetId) {
+      videoAsset = session.assets.get(options.assetId);
+    }
+    if (!videoAsset) {
+      for (const [, asset] of session.assets) {
+        if (asset.type === 'video' && !asset.aiGenerated) { videoAsset = asset; break; }
+      }
+    }
+    if (!videoAsset) {
+      for (const [, asset] of session.assets) {
+        if (asset.type === 'video') { videoAsset = asset; break; }
+      }
+    }
+    if (!videoAsset) {
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'No video asset found in session. Please upload a video first.' }));
+      return;
+    }
+
+    if (!existsSync(videoAsset.path)) {
+      res.writeHead(410, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Video file no longer exists. Please re-upload your video.', code: 'VIDEO_FILE_MISSING' }));
+      return;
+    }
+
+    registerJob(sessionId, jobId, 'remove-dead-air', 'Analyzing transcript for repeated takes...', videoAsset.id);
+    console.log(`\n[${jobId}] === CUT REPEATED LINES ===`);
+    console.log(`[${jobId}] Using video: ${videoAsset.filename}`);
+
+    const totalDuration = await getVideoDuration(videoAsset.path);
+    console.log(`[${jobId}] Video duration: ${totalDuration.toFixed(2)}s`);
+
+    // Step 1: Get or generate transcript
+    updateJobProgress(jobId, 10, 'Getting transcript...');
+    const transcription = await getOrTranscribeVideo(session, videoAsset, jobId.substring(0, 8));
+
+    if (!transcription.words || transcription.words.length === 0) {
+      completeJob(jobId, { message: 'No words detected in transcript' });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ success: true, duration: totalDuration, removedDuration: 0, message: 'No words detected in transcript — nothing to cut.' }));
+      return;
+    }
+
+    console.log(`[${jobId}] Transcript: ${transcription.words.length} words, "${transcription.text.substring(0, 120)}..."`);
+
+    // Step 2: Send transcript to Gemini to identify repeated takes
+    updateJobProgress(jobId, 25, 'Analyzing transcript for repeated takes...');
+    const ai = new GoogleGenAI({ apiKey: geminiKey });
+
+    // Build a word-level transcript with timestamps for Gemini
+    const wordTimeline = transcription.words.map((w, i) =>
+      `[${w.start.toFixed(2)}-${w.end.toFixed(2)}] ${w.text}`
+    ).join('\n');
+
+    const geminiResponse = await ai.models.generateContent({
+      model: 'gemini-2.0-flash',
+      contents: [{
+        role: 'user',
+        parts: [{
+          text: `Analyze this narration transcript with word-level timestamps. The speaker recorded multiple takes — they would say a line, mess up or decide to redo it, and say it again. Identify sections where the speaker repeated themselves (re-did a take).
+
+RULES:
+1. A "repeated take" is when the speaker says essentially the same sentence/phrase again (even if slightly differently worded).
+2. For each set of repeated takes, I want to KEEP only the LAST take (the final version the speaker chose).
+3. Return the time ranges of ALL earlier takes that should be REMOVED (everything except the last take of each phrase).
+4. Include a small buffer (0.15s) before and after each cut to avoid chopping mid-word.
+5. Do NOT flag normal speech patterns, emphasis, or intentional repetition (like "no, no, no" for effect).
+6. Only flag clear re-takes where the speaker restarted a sentence or phrase.
+7. If there are no repeated takes, return an empty cutsToRemove array.
+
+TRANSCRIPT (word-level timestamps):
+${wordTimeline}
+
+TOTAL DURATION: ${totalDuration.toFixed(2)}s
+
+Return JSON only:
+{
+  "cutsToRemove": [
+    { "start": 0.0, "end": 5.2, "reason": "First take of intro line, speaker redid it at 5.5s" }
+  ],
+  "summary": "Found N sets of repeated takes, removing N earlier takes"
+}`
+        }]
+      }],
+      config: {
+        responseMimeType: 'application/json',
+      },
+    });
+
+    let analysisResult;
+    const respText = geminiResponse.text || '';
+    try {
+      analysisResult = JSON.parse(respText);
+    } catch {
+      const jsonMatch = respText.match(/\{[\s\S]*\}/);
+      analysisResult = jsonMatch ? JSON.parse(jsonMatch[0]) : { cutsToRemove: [], summary: 'Could not parse response' };
+    }
+
+    const cutsToRemove = (analysisResult.cutsToRemove || [])
+      .filter(cut => typeof cut.start === 'number' && typeof cut.end === 'number' && cut.end > cut.start)
+      .sort((a, b) => a.start - b.start);
+
+    console.log(`[${jobId}] Gemini analysis: ${analysisResult.summary || 'done'}`);
+    console.log(`[${jobId}] Cuts to remove: ${cutsToRemove.length}`);
+    cutsToRemove.forEach((cut, i) => {
+      console.log(`[${jobId}]   Cut ${i + 1}: ${cut.start.toFixed(2)}s → ${cut.end.toFixed(2)}s (${(cut.end - cut.start).toFixed(2)}s) — ${cut.reason}`);
+    });
+
+    if (cutsToRemove.length === 0) {
+      completeJob(jobId, { message: 'No repeated takes detected' });
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({
+        success: true,
+        duration: totalDuration,
+        removedDuration: 0,
+        message: analysisResult.summary || 'No repeated takes detected — your narration looks clean!',
+      }));
+      return;
+    }
+
+    // Step 3: Compute keep segments (inverse of cuts)
+    updateJobProgress(jobId, 40, `Removing ${cutsToRemove.length} repeated takes...`);
+    const keepSegments = [];
+    let cursor = 0;
+
+    for (const cut of cutsToRemove) {
+      const segStart = Math.max(0, cursor);
+      const segEnd = Math.max(segStart, cut.start);
+      if (segEnd - segStart > 0.05) { // Skip tiny segments < 50ms
+        keepSegments.push({ start: segStart, end: segEnd });
+      }
+      cursor = cut.end;
+    }
+    // Final segment from last cut to end of video
+    if (cursor < totalDuration - 0.05) {
+      keepSegments.push({ start: cursor, end: totalDuration });
+    }
+
+    if (keepSegments.length === 0) {
+      failJob(jobId, 'All content would be removed — aborting to protect your video');
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ error: 'Analysis would remove all content. This seems wrong — please try again.' }));
+      return;
+    }
+
+    const totalKeptDuration = keepSegments.reduce((sum, seg) => sum + (seg.end - seg.start), 0);
+    const removedDuration = totalDuration - totalKeptDuration;
+    console.log(`[${jobId}] Keeping ${keepSegments.length} segments (${totalKeptDuration.toFixed(2)}s), removing ${removedDuration.toFixed(2)}s (${((removedDuration / totalDuration) * 100).toFixed(1)}%)`);
+
+    // Safety check: don't remove more than 70% of the video
+    if (removedDuration > totalDuration * 0.7) {
+      failJob(jobId, 'Would remove more than 70% of the video — aborting');
+      res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({
+        error: `Analysis would remove ${((removedDuration / totalDuration) * 100).toFixed(0)}% of your video. This seems excessive — please review and try again.`,
+        cutsToRemove,
+      }));
+      return;
+    }
+
+    // Step 4: Extract each keep segment (same pattern as dead air removal)
+    console.log(`[${jobId}] Extracting ${keepSegments.length} segments...`);
+    for (let i = 0; i < keepSegments.length; i++) {
+      const seg = keepSegments[i];
+      const segmentPath = join(session.dir, `cutrepeat-seg-${Date.now()}-${i}.mp4`);
+      segmentPaths.push(segmentPath);
+
+      const segDuration = seg.end - seg.start;
+      await runFFmpeg([
+        '-y', '-i', videoAsset.path,
+        '-ss', seg.start.toString(),
+        '-t', segDuration.toString(),
+        '-c:v', 'libx264', '-preset', 'ultrafast', '-crf', '18',
+        '-c:a', 'aac', '-b:a', '192k',
+        segmentPath
+      ], jobId);
+
+      const progressPct = 40 + Math.round((i / keepSegments.length) * 40);
+      updateJobProgress(jobId, progressPct, `Extracting segment ${i + 1}/${keepSegments.length}...`);
+      console.log(`[${jobId}] Segment ${i + 1}/${keepSegments.length} done`);
+    }
+
+    // Step 5: Concatenate
+    updateJobProgress(jobId, 85, 'Concatenating segments...');
+    const concatList = segmentPaths.map(p => `file '${p}'`).join('\n');
+    writeFileSync(concatListPath, concatList);
+
+    await runFFmpeg(['-y', '-f', 'concat', '-safe', '0', '-i', concatListPath, '-c', 'copy', '-movflags', '+faststart', outputPath], jobId);
+    console.log(`[${jobId}] Concatenation complete`);
+
+    // Step 6: Verify output
+    updateJobProgress(jobId, 92, 'Verifying output...');
+    const { execFileSync } = await import('child_process');
+    const probeOutput = execFileSync('ffprobe', [
+      '-v', 'error', '-show_entries', 'stream=codec_type', '-of', 'csv=p=0', outputPath
+    ], { encoding: 'utf-8' });
+    const streams = probeOutput.trim().split('\n');
+    console.log(`[${jobId}] Output streams: ${streams.join(', ')}`);
+
+    // Step 7: Cleanup temp files
+    segmentPaths.forEach(p => { try { unlinkSync(p); } catch {} });
+    try { unlinkSync(concatListPath); } catch {}
+
+    // Step 8: Replace original file in-place
+    const { rename, stat } = await import('fs/promises');
+    unlinkSync(videoAsset.path);
+    await rename(outputPath, videoAsset.path);
+
+    const newStats = await stat(videoAsset.path);
+    videoAsset.duration = totalKeptDuration;
+    videoAsset.size = newStats.size;
+    session.editCount++;
+
+    // Invalidate transcript cache (video content changed)
+    session.transcriptCache.delete(videoAsset.id);
+
+    completeJob(jobId, { removedDuration, cutsCount: cutsToRemove.length });
+    console.log(`\n[${jobId}] === CUT REPEATED LINES COMPLETE ===`);
+
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({
+      success: true,
+      duration: totalKeptDuration,
+      originalDuration: totalDuration,
+      removedDuration,
+      cutsRemoved: cutsToRemove.length,
+      size: newStats.size,
+      editCount: session.editCount,
+      summary: analysisResult.summary,
+    }));
+
+  } catch (error) {
+    console.error(`[${jobId}] Cut repeated lines error:`, error.message);
+    failJob(jobId, error.message);
+    segmentPaths.forEach(p => { try { unlinkSync(p); } catch {} });
+    try { unlinkSync(concatListPath); } catch {}
+    try { unlinkSync(outputPath); } catch {}
+    res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.end(JSON.stringify({ error: error.message }));
+  }
+}
+
 // Generate chapters for a session
 async function handleSessionChapters(req, res, sessionId) {
   const session = getSession(sessionId);
@@ -2226,6 +2588,61 @@ async function handleProjectSave(req, res, sessionId) {
   }
 }
 
+// ── Subject Detection for 9:16 Reframe (Feature 7A) ──────────────────────────
+// Runs Python OpenCV face detection on the primary V1 video to find the average
+// horizontal position of the subject. Returns a normalized x_center (0–1) where
+// 0.5 = dead center. Falls back to 0.5 if detection fails or no faces found.
+async function detectSubjectPosition(videoPath) {
+  const scriptPath = join(process.cwd(), 'scripts', 'detect-subjects.py');
+  if (!existsSync(scriptPath)) {
+    console.log('[SubjectTrack] detect-subjects.py not found, falling back to center crop');
+    return { x_center: 0.5, confidence: 0, fallback: true };
+  }
+
+  return new Promise((resolve) => {
+    const timeout = setTimeout(() => {
+      console.log('[SubjectTrack] Detection timed out after 30s, falling back to center');
+      py.kill();
+      resolve({ x_center: 0.5, confidence: 0, fallback: true });
+    }, 30000);
+
+    const py = spawn('python3', [scriptPath, videoPath, '--sample-rate', '2']);
+    let stdout = '';
+    let stderr = '';
+
+    py.stdout.on('data', (data) => { stdout += data.toString(); });
+    py.stderr.on('data', (data) => { stderr += data.toString(); });
+
+    py.on('close', (code) => {
+      clearTimeout(timeout);
+      if (code !== 0 || !stdout.trim()) {
+        console.log(`[SubjectTrack] Detection failed (code ${code}): ${stderr.slice(-200)}`);
+        resolve({ x_center: 0.5, confidence: 0, fallback: true });
+        return;
+      }
+      try {
+        const result = JSON.parse(stdout.trim());
+        if (result.error) {
+          console.log(`[SubjectTrack] ${result.error}`);
+          resolve({ x_center: 0.5, confidence: 0, fallback: true });
+        } else {
+          console.log(`[SubjectTrack] Detected subject at x=${result.x_center} (confidence: ${result.confidence}, faces: ${result.face_count})`);
+          resolve(result);
+        }
+      } catch (e) {
+        console.log(`[SubjectTrack] JSON parse error: ${e.message}`);
+        resolve({ x_center: 0.5, confidence: 0, fallback: true });
+      }
+    });
+
+    py.on('error', (err) => {
+      clearTimeout(timeout);
+      console.log(`[SubjectTrack] Spawn error: ${err.message}`);
+      resolve({ x_center: 0.5, confidence: 0, fallback: true });
+    });
+  });
+}
+
 // Render project to video
 async function handleProjectRender(req, res, sessionId) {
   const session = getSession(sessionId);
@@ -2242,7 +2659,32 @@ async function handleProjectRender(req, res, sessionId) {
     const isPreview = options.preview === true;
 
     const clips = session.project.clips;
-    const settings = session.project.settings;
+    const baseSettings = session.project.settings;
+
+    // Allow output dimension overrides for dual export (6A)
+    const outputWidth = options.outputWidth || baseSettings.width;
+    const outputHeight = options.outputHeight || baseSettings.height;
+    const cropMode = options.cropMode || null; // 'center', 'subject-track', or null
+    // Use base settings for internal rendering, override for final output
+    const settings = { ...baseSettings };
+    const needsCrop = cropMode && (outputWidth !== settings.width || outputHeight !== settings.height);
+
+    // ── Subject tracking pre-pass (Feature 7A) ──
+    // If cropMode is 'subject-track', detect face positions BEFORE rendering
+    let subjectXCenter = 0.5; // default: center
+    if (cropMode === 'subject-track' && needsCrop) {
+      // Find the primary V1 video asset to analyze
+      const v1Clip = clips.find(c => c.trackId === 'V1');
+      if (v1Clip) {
+        const v1Asset = session.assets.get(v1Clip.assetId);
+        if (v1Asset && v1Asset.path) {
+          console.log(`[${sessionId}] Running subject detection on V1 asset: ${v1Asset.originalName || v1Asset.path}`);
+          const detection = await detectSubjectPosition(v1Asset.path);
+          subjectXCenter = detection.x_center;
+          console.log(`[${sessionId}] Subject X center: ${subjectXCenter}${detection.fallback ? ' (fallback)' : ''}`);
+        }
+      }
+    }
 
     if (clips.length === 0) {
       res.writeHead(400, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
@@ -2250,8 +2692,12 @@ async function handleProjectRender(req, res, sessionId) {
       return;
     }
 
-    console.log(`\n[${sessionId}] === RENDER ${isPreview ? 'PREVIEW' : 'EXPORT'} ===`);
-    console.log(`[${sessionId}] ${clips.length} clips, ${settings.width}x${settings.height}`);
+    const renderLabel = options.renderLabel || (isPreview ? 'Preview' : 'Export');
+    const renderJobId = randomUUID();
+    registerJob(sessionId, renderJobId, isPreview ? 'preview' : 'render', `${renderLabel} render (${clips.length} clips, ${outputWidth}x${outputHeight})`);
+
+    console.log(`\n[${sessionId}] === RENDER ${renderLabel.toUpperCase()} ===`);
+    console.log(`[${sessionId}] ${clips.length} clips, render at ${settings.width}x${settings.height}${needsCrop ? ` → crop to ${outputWidth}x${outputHeight}` : ''}`);
 
     // Sort clips by track for layering (V1 first, then V2, etc.)
     const videoClips = clips
@@ -2322,8 +2768,21 @@ async function handleProjectRender(req, res, sessionId) {
       lastVideo = `out${idx}`;
     }
 
-    // Rename final output
-    filterParts.push(`[${lastVideo}]copy[vout]`);
+    // Final video output — optionally crop for vertical export (6B + 7A)
+    if (needsCrop) {
+      // Crop width for the target aspect ratio
+      const cropW = `ih*${outputWidth}/${outputHeight}`;
+      const cropH = `ih`;
+      // X offset: use subject tracking position or center (Feature 7)
+      // subjectXCenter is 0.0–1.0 where 0.5 = center. Convert to crop offset:
+      //   x = subjectXCenter * iw - cropW/2, clamped to [0, iw-cropW]
+      const xExpr = cropMode === 'subject-track'
+        ? `max(0\\, min(iw-${cropW}\\, ${subjectXCenter}*iw-${cropW}/2))`
+        : `(iw-${cropW})/2`;
+      filterParts.push(`[${lastVideo}]crop=${cropW}:${cropH}:${xExpr}:0,scale=${outputWidth}:${outputHeight}[vout]`);
+    } else {
+      filterParts.push(`[${lastVideo}]copy[vout]`);
+    }
 
     // Audio mixing
     let audioFilter = '';
@@ -2350,7 +2809,8 @@ async function handleProjectRender(req, res, sessionId) {
     }
 
     // Build final command
-    const outputPath = join(session.rendersDir, isPreview ? 'preview.mp4' : `export-${Date.now()}.mp4`);
+    const outputFilename = options.outputFilename || (isPreview ? 'preview.mp4' : `export-${Date.now()}.mp4`);
+    const outputPath = join(session.rendersDir, outputFilename);
 
     const ffmpegArgs = [
       '-y',
@@ -2377,13 +2837,15 @@ async function handleProjectRender(req, res, sessionId) {
 
     console.log(`[${sessionId}] FFmpeg render command prepared`);
 
-    await runFFmpeg(ffmpegArgs, sessionId);
+    await runFFmpeg(ffmpegArgs, sessionId, { registeredJobId: renderJobId, durationSec: totalDuration });
 
     const { stat } = await import('fs/promises');
     const outputStats = await stat(outputPath);
 
     console.log(`[${sessionId}] Render complete: ${(outputStats.size / 1024 / 1024).toFixed(1)} MB`);
     console.log(`[${sessionId}] === RENDER COMPLETE ===\n`);
+
+    completeJob(renderJobId, { path: outputPath, size: outputStats.size });
 
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({
@@ -2392,10 +2854,12 @@ async function handleProjectRender(req, res, sessionId) {
       size: outputStats.size,
       duration: totalDuration,
       downloadUrl: `/session/${sessionId}/renders/${isPreview ? 'preview' : 'export'}`,
+      outputFilename,
     }));
 
   } catch (error) {
     console.error(`[${sessionId}] Render error:`, error.message);
+    if (typeof renderJobId !== 'undefined') failJob(renderJobId, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -2417,6 +2881,9 @@ async function handleRenderDownload(req, res, sessionId, renderType) {
   let renderFile;
   if (renderType === 'preview') {
     renderFile = files.find(f => f === 'preview.mp4');
+  } else if (renderType.endsWith('.mp4')) {
+    // Specific file requested (for dual export)
+    renderFile = files.find(f => f === renderType);
   } else {
     // Get most recent export
     renderFile = files
@@ -2484,6 +2951,8 @@ async function handleCreateGif(req, res, sessionId) {
     }
 
     const jobId = randomUUID();
+    registerJob(sessionId, jobId, 'create-gif', `Create animated GIF (${effect}, ${duration}s)`, assetId);
+
     console.log(`\n[${jobId}] === CREATE ANIMATED GIF ===`);
     console.log(`[${jobId}] Source: ${sourceAsset.filename}, Effect: ${effect}, Duration: ${duration}s`);
 
@@ -2587,6 +3056,8 @@ async function handleCreateGif(req, res, sessionId) {
     console.log(`[${jobId}] GIF created: ${(stats.size / 1024).toFixed(1)} KB`);
     console.log(`[${jobId}] === GIF CREATION COMPLETE ===\n`);
 
+    completeJob(jobId, { assetId: gifId, size: stats.size });
+
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({
       success: true,
@@ -2604,6 +3075,7 @@ async function handleCreateGif(req, res, sessionId) {
 
   } catch (error) {
     console.error(`[${sessionId}] GIF creation error:`, error.message);
+    failJob(jobId, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -3262,6 +3734,7 @@ async function handleTranscribe(req, res, sessionId) {
   }
 
   const jobId = sessionId.substring(0, 8);
+  const transcribeJobId = randomUUID();
   const audioPath = join(TEMP_DIR, `${jobId}-caption-audio.mp3`);
 
   try {
@@ -3292,6 +3765,8 @@ async function handleTranscribe(req, res, sessionId) {
     const useGemini = !hasLocalWhisper && !openaiKey && !!geminiKey;
 
     const method = useLocalWhisper ? 'Local Whisper' : useOpenAIWhisper ? 'OpenAI Whisper' : 'Gemini';
+    registerJob(sessionId, transcribeJobId, 'transcribe', `Transcribe audio (${method})`, assetId);
+
     console.log(`\n[${jobId}] === TRANSCRIBE FOR CAPTIONS (${method}) ===`);
 
     if (useLocalWhisper) {
@@ -3554,6 +4029,8 @@ Guidelines:
 
     console.log(`[${jobId}] === TRANSCRIPTION DONE ===\n`);
 
+    completeJob(transcribeJobId, { wordCount: words.length });
+
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({
       success: true,
@@ -3564,6 +4041,7 @@ Guidelines:
 
   } catch (error) {
     console.error(`[${jobId}] Error:`, error.message);
+    failJob(transcribeJobId, error.message);
     try { unlinkSync(audioPath); } catch {}
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
@@ -4168,6 +4646,8 @@ async function handleGenerateAnimation(req, res, sessionId) {
     const outputPath = join(session.assetsDir, `${assetId}.mp4`);
     const thumbPath = join(session.assetsDir, `${assetId}_thumb.jpg`);
     const propsPath = join(session.dir, `${jobId}-props.json`);
+
+    registerJob(sessionId, jobId, 'generate-animation', `Generate AI animation: ${description.substring(0, 60)}...`);
 
     console.log(`\n[${jobId}] === GENERATE AI ANIMATION ===`);
     console.log(`[${jobId}] Description: ${description}`);
@@ -4820,6 +5300,8 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
     console.log(`[${jobId}] AI animation rendered: ${assetId} (${durationInSeconds}s)`);
     console.log(`[${jobId}] === GENERATION COMPLETE ===\n`);
 
+    completeJob(jobId, { assetId, duration: durationInSeconds });
+
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({
       success: true,
@@ -4833,6 +5315,7 @@ ${attachedAssetIds?.length ? `- IMPORTANT: Include media scenes to showcase the 
 
   } catch (error) {
     console.error('AI animation generation error:', error);
+    failJob(jobId, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -4892,6 +5375,8 @@ async function handleEditAnimation(req, res, sessionId) {
     }
 
     const jobId = randomUUID();
+    registerJob(sessionId, jobId, 'edit-animation', `Edit animation: ${editPrompt.substring(0, 60)}...`, assetId);
+
     // IMPORTANT: Reuse the same asset ID to replace in-place (no asset creep)
     const outputPath = originalAsset.path; // Overwrite existing video file
     const thumbPath = originalAsset.thumbPath || join(session.assetsDir, `${assetId}_thumb.jpg`);
@@ -5241,11 +5726,14 @@ Return ONLY the complete JSON structure with your minimal change applied. No mar
 
     console.log(`[${jobId}] Sending response:`, JSON.stringify(responseData, null, 2));
 
+    completeJob(jobId, { assetId, duration: durationInSeconds });
+
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify(responseData));
 
   } catch (error) {
     console.error('Animation edit error:', error);
+    failJob(jobId, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -5285,6 +5773,9 @@ async function handleGenerateImage(req, res, sessionId) {
     }
 
     const jobId = sessionId.substring(0, 8);
+    const picassoJobId = randomUUID();
+    registerJob(sessionId, picassoJobId, 'generate-image', `Picasso: ${prompt.substring(0, 60)}...`);
+
     console.log(`\n[${jobId}] === PICASSO: GENERATE IMAGE ===`);
     console.log(`[${jobId}] User prompt: ${prompt}`);
     console.log(`[${jobId}] Aspect ratio: ${aspectRatio}, Resolution: ${resolution}`);
@@ -5296,41 +5787,45 @@ async function handleGenerateImage(req, res, sessionId) {
         console.log(`[${jobId}] Enhancing prompt with Picasso AI...`);
         const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
-        const systemPrompt = `You are Picasso, an expert AI prompt engineer specializing in image generation. Your role is to transform simple user requests into detailed, visually compelling prompts that produce stunning images.
+        const systemPrompt = `You are Picasso, APRT Media's visual artist. You enhance image generation prompts for documentary content about hip-hop history and Black culture.
 
-## Your Expertise
-- Deep knowledge of photography, cinematography, art styles, and visual composition
-- Understanding of lighting (golden hour, studio, dramatic, soft, etc.)
-- Mastery of artistic movements (impressionism, surrealism, photorealism, etc.)
-- Knowledge of camera perspectives, lenses, and depth of field
-- Understanding of color theory and mood creation
+## BRAND AESTHETIC
+- Warm golden tones (#D4AF37) — the signature APRT Media accent
+- 16mm film grain texture — analog, tactile, archival feel
+- Dark moody backgrounds (#0A0A0A, deep browns, charcoal) — never bright or white
+- Documentary photography and archival stills aesthetic
+- Serif typography feel (Glamor, Audrey) — elegant and timeless
+- Dust & scratch overlays — aged, historical quality
+- Warm lighting (golden hour, tungsten, candlelight)
+- Think Ken Burns documentary meets golden-era hip-hop photography
 
 ## Prompt Enhancement Guidelines
-
-1. **Visual Details**: Add specific visual elements - textures, materials, colors, patterns
-2. **Lighting**: Specify lighting conditions that enhance the mood (soft diffused light, dramatic rim lighting, golden hour glow, neon accents)
-3. **Composition**: Include framing, perspective, and focal points (close-up, wide shot, bird's eye view, rule of thirds)
-4. **Style**: Add artistic style when appropriate (cinematic, photorealistic, digital art, oil painting, etc.)
-5. **Atmosphere**: Include mood and atmosphere descriptors (ethereal, moody, vibrant, serene, dynamic)
-6. **Quality Markers**: Add quality enhancers (highly detailed, 8K, professional photography, masterpiece)
+1. **Always add**: warm golden lighting, subtle film grain, documentary photography quality
+2. **Lighting**: Prefer golden hour, tungsten warmth, candlelight — never cold/blue/clinical
+3. **Backgrounds**: Default to dark, rich, textured — never plain white or bright
+4. **Textures**: Film grain, paper texture, dust particles, vintage photo edges
+5. **Color palette**: Warm ambers, deep golds, rich browns, cream whites — avoid neon/electric
+6. **Composition**: Intimate close-ups, archival framing, vintage magazine layouts, documentary stills
+7. **Mood**: Reverent, culturally rich, educational, cinematic — never flashy or commercial
 
 ## Rules
 - Keep the enhanced prompt under 200 words
-- Preserve the user's core intent - don't change WHAT they want, enhance HOW it looks
-- Don't add text/words to appear in the image unless requested
+- Preserve the user's core intent — enhance HOW it looks, not WHAT they asked for
+- Don't add text/words to the image unless specifically requested
 - Output ONLY the enhanced prompt, no explanations or markdown
-- Make every image feel premium, professional, and visually striking
+- Add "subtle film grain, warm golden highlights, documentary photography" to every prompt
+- AVOID: neon colors, cartoon/anime styles, corporate stock photo look, generic "hip hop" stereotypes, bright backgrounds
 
 ## Examples
 
-User: "a cat sitting on a windowsill"
-Enhanced: "A majestic tabby cat lounging on a sun-drenched windowsill, soft golden hour light streaming through sheer curtains, dust particles floating in the warm light beams, cozy interior with potted plants, shallow depth of field, photorealistic, intimate portrait style, warm amber and cream color palette, highly detailed fur texture"
+User: "background image"
+Enhanced: "Rich textured background with subtle 16mm film grain overlay, warm golden tones and deep amber gradients, dust particles floating in soft tungsten light, aged paper texture blending into dark moody charcoal, vintage documentary aesthetic, archival quality, warm golden highlights (#D4AF37), cinematic depth, 2.35:1 aspect ratio feel"
 
-User: "cyberpunk city"
-Enhanced: "Sprawling cyberpunk metropolis at night, towering neon-lit skyscrapers piercing through low-hanging smog, holographic advertisements reflecting off rain-slicked streets, flying vehicles with glowing thrusters, diverse crowd of augmented humans, pink and cyan neon color scheme, cinematic wide-angle shot, blade runner aesthetic, volumetric fog, raytraced reflections, 8K ultra detailed"
+User: "portrait photo"
+Enhanced: "Intimate documentary portrait with warm golden hour lighting, shallow depth of field, subtle 16mm film grain texture, dark moody background fading to rich charcoal, soft golden highlights on skin, dust particles in backlight, vintage photography aesthetic, archival quality, warm amber and cream color palette, film photography feel"
 
-User: "a peaceful forest"
-Enhanced: "Ancient moss-covered forest with towering redwood trees, ethereal morning mist weaving between massive trunks, soft dappled sunlight filtering through the dense canopy, ferns and wildflowers carpeting the forest floor, a gentle stream with crystal-clear water, mystical and serene atmosphere, nature photography style, rich greens and earth tones, depth and scale, photorealistic, National Geographic quality"`;
+User: "album cover"
+Enhanced: "Vintage hip-hop era album cover aesthetic, dark textured background with gold foil accents, warm tungsten lighting creating dramatic shadows, 16mm film grain overlay, elegant serif typography space, dust and scratch texture, aged vinyl record quality, rich golden tones (#D4AF37) and deep browns, documentary photography style, archival museum print quality"`;
 
         const result = await ai.models.generateContent({
           model: 'gemini-2.0-flash',
@@ -5443,6 +5938,8 @@ Enhanced: "Ancient moss-covered forest with towering redwood trees, ethereal mor
     saveAssetMetadata(session); // Persist asset metadata to disk
     console.log(`[${jobId}] === PICASSO COMPLETE ===\n`);
 
+    completeJob(picassoJobId, { imageCount: generatedAssets.length });
+
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({
       success: true,
@@ -5452,6 +5949,7 @@ Enhanced: "Ancient moss-covered forest with towering redwood trees, ethereal mor
 
   } catch (error) {
     console.error('Image generation error:', error);
+    failJob(picassoJobId, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -5500,6 +5998,8 @@ async function handleGenerateVideo(req, res, sessionId) {
     }
 
     const jobId = sessionId.substring(0, 8);
+    const videoGenJobId = randomUUID();
+    registerJob(sessionId, videoGenJobId, 'generate-video', `DiCaprio: animate ${imageAsset.filename} (${duration}s)`, imageAssetId);
     console.log(`\n[${jobId}] === DICAPRIO: GENERATE VIDEO ===`);
     console.log(`[${jobId}] User prompt: ${prompt}`);
     console.log(`[${jobId}] Source image: ${imageAsset.filename}`);
@@ -5512,31 +6012,38 @@ async function handleGenerateVideo(req, res, sessionId) {
         console.log(`[${jobId}] Enhancing prompt with DiCaprio AI...`);
         const ai = new GoogleGenAI({ apiKey: geminiApiKey });
 
-        const systemPrompt = `You are DiCaprio, an expert AI prompt engineer specializing in image-to-video generation. Your role is to transform simple motion requests into detailed, cinematic prompts that produce stunning videos.
+        const systemPrompt = `You are DiCaprio, APRT Media's motion artist. You enhance video generation prompts for documentary-style content about hip-hop history and Black culture.
 
-## Your Expertise
-- Deep knowledge of cinematography, camera movements, and film techniques
-- Understanding of timing, pacing, and motion dynamics
-- Mastery of visual storytelling through movement
-- Knowledge of video generation model capabilities
+## BRAND AESTHETIC
+- Slow, deliberate camera movements — think archival footage on a flatbed editor
+- Smooth pans, gentle zooms, slight film shake — never flashy or rapid
+- Warm golden lighting (#D4AF37) and film grain texture
+- Documentary handheld feel over slick steadicam
+- Atmospheric haze, dust particles, soft bokeh, natural light
+- The pace of a Ken Burns documentary — reverent and cinematic
 
 ## Prompt Enhancement Guidelines
+1. **Camera Movement**: Default to slow, cinematic movements — slow zoom in, gentle pan, subtle drift
+2. **Film Quality**: Add "film grain texture, warm golden tones, documentary feel" to every prompt
+3. **Motion Style**: Prefer "handheld documentary" over "smooth steadicam" — slight imperfection adds soul
+4. **Atmosphere**: Atmospheric haze, soft bokeh, dust particles, warm tungsten light rays
+5. **Timing**: Always "gradual", "slow", "gentle", "deliberate" — not "dynamic" or "fast"
+6. **Lighting**: Warm golden, tungsten, candlelight — never cold or clinical
 
-1. **Camera Movement**: Be specific about camera motion (dolly, pan, tilt, zoom, crane, tracking, handheld)
-2. **Motion Direction**: Specify direction and speed (slow zoom in, gentle pan left, dynamic push forward)
-3. **Subject Motion**: Describe how elements in the scene should move (hair flowing, leaves rustling, water rippling)
-4. **Atmosphere**: Include atmospheric effects (light rays moving, dust particles, fog drifting)
-5. **Timing**: Use terms like "gradual", "sudden", "rhythmic", "smooth", "cinematic"
+## Rules
+- Return ONLY the enhanced prompt text, no explanations or markdown
+- Keep enhanced prompt under 200 words
+- Preserve the user's core movement intent
+- AVOID: fast motion, neon/electric colors, commercial/corporate feel, overly polished look
+- Default to subtle natural movement even when the user says "animate"
 
-## Response Format
-Return ONLY the enhanced prompt text. No explanations, no quotes, no markdown.
-
-## Example Input -> Output
+## Examples
 Input: "make it move"
-Output: "Cinematic slow zoom in with subtle parallax movement, gentle ambient motion with soft light rays drifting through the scene, atmospheric particles floating in the air, smooth and dreamlike camera drift"
+Output: "Slow cinematic zoom in with gentle documentary handheld sway, warm golden light shifting subtly across the frame, atmospheric dust particles drifting in tungsten backlight, film grain texture, smooth and deliberate camera drift with slight film shake"
 
 Input: "zoom out"
-Output: "Epic reveal shot with slow cinematic zoom out, camera gently pulling back to reveal the full scene, subtle atmospheric haze and soft light flares, smooth dolly movement with slight vertical lift"`;
+Output: "Gradual cinematic pullback revealing the full scene, warm golden tones deepening as the frame expands, slight handheld documentary wobble, atmospheric haze and soft light flares, film grain texture, slow deliberate dolly movement like archival footage"`;
+
 
         const result = await ai.models.generateContent({
           model: 'gemini-2.0-flash',
@@ -5575,12 +6082,15 @@ Output: "Epic reveal shot with slow cinematic zoom out, camera gently pulling ba
       onQueueUpdate: (update) => {
         if (update.status === 'IN_QUEUE') {
           console.log(`[${jobId}] Queued at position ${update.position || '?'}`);
+          updateJobProgress(videoGenJobId, 10, 'Queued for video generation...');
         } else if (update.status === 'IN_PROGRESS') {
           console.log(`[${jobId}] Processing...`);
+          updateJobProgress(videoGenJobId, 50, 'Generating video...');
         }
       },
     });
 
+    updateJobProgress(videoGenJobId, 80, 'Downloading generated video...');
     console.log(`[${jobId}] Video generation complete!`);
 
     // Download the generated video - SDK returns { data, requestId }
@@ -5669,6 +6179,8 @@ Output: "Epic reveal shot with slow cinematic zoom out, camera gently pulling ba
     console.log(`[${jobId}] Saved video: ${asset.filename} (${(stats.size / 1024 / 1024).toFixed(1)} MB)`);
     console.log(`[${jobId}] === DICAPRIO COMPLETE ===\n`);
 
+    completeJob(videoGenJobId, { assetId: videoId, duration: videoDuration });
+
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({
       success: true,
@@ -5684,6 +6196,7 @@ Output: "Epic reveal shot with slow cinematic zoom out, camera gently pulling ba
   } catch (error) {
     console.error('Video generation error:', error);
     console.error('Error stack:', error.stack);
+    if (typeof videoGenJobId !== 'undefined') failJob(videoGenJobId, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -5732,6 +6245,8 @@ async function handleRestyleVideo(req, res, sessionId) {
     }
 
     const jobId = sessionId.substring(0, 8);
+    const restyleJobId = randomUUID();
+    registerJob(sessionId, restyleJobId, 'restyle-video', `DiCaprio: restyle ${videoAsset.filename}`, videoAssetId);
     console.log(`\n[${jobId}] === DICAPRIO: RESTYLE VIDEO ===`);
     console.log(`[${jobId}] User prompt: ${prompt}`);
     console.log(`[${jobId}] Source video: ${videoAsset.filename}`);
@@ -5818,12 +6333,15 @@ Return ONLY the enhanced prompt, no explanations.`
       onQueueUpdate: (update) => {
         if (update.status === 'IN_QUEUE') {
           console.log(`[${jobId}] Queued at position ${update.position || '?'}`);
+          updateJobProgress(restyleJobId, 20, 'Queued for restyle...');
         } else if (update.status === 'IN_PROGRESS') {
           console.log(`[${jobId}] Processing...`);
+          updateJobProgress(restyleJobId, 50, 'Applying style transfer...');
         }
       },
     });
 
+    updateJobProgress(restyleJobId, 80, 'Downloading restyled video...');
     console.log(`[${jobId}] Video restyle complete!`);
 
     // Download the restyled video - SDK returns { data, requestId }
@@ -5899,6 +6417,8 @@ Return ONLY the enhanced prompt, no explanations.`
     console.log(`[${jobId}] Saved restyled video: ${asset.filename}`);
     console.log(`[${jobId}] === DICAPRIO RESTYLE COMPLETE ===\n`);
 
+    completeJob(restyleJobId, { assetId: newVideoId, duration: videoDuration });
+
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({
       success: true,
@@ -5913,6 +6433,7 @@ Return ONLY the enhanced prompt, no explanations.`
 
   } catch (error) {
     console.error('Video restyle error:', error);
+    if (typeof restyleJobId !== 'undefined') failJob(restyleJobId, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -5953,6 +6474,8 @@ async function handleRemoveVideoBg(req, res, sessionId) {
     }
 
     const jobId = sessionId.substring(0, 8);
+    const removeBgJobId = randomUUID();
+    registerJob(sessionId, removeBgJobId, 'remove-video-bg', `DiCaprio: remove background from ${videoAsset.filename}`, videoAssetId);
     console.log(`\n[${jobId}] === DICAPRIO: REMOVE VIDEO BACKGROUND ===`);
     console.log(`[${jobId}] Source video: ${videoAsset.filename}`);
 
@@ -5998,12 +6521,15 @@ async function handleRemoveVideoBg(req, res, sessionId) {
       onQueueUpdate: (update) => {
         if (update.status === 'IN_QUEUE') {
           console.log(`[${jobId}] Queued at position ${update.position || '?'}`);
+          updateJobProgress(removeBgJobId, 15, 'Queued for background removal...');
         } else if (update.status === 'IN_PROGRESS') {
           console.log(`[${jobId}] Processing...`);
+          updateJobProgress(removeBgJobId, 50, 'Removing background...');
         }
       },
     });
 
+    updateJobProgress(removeBgJobId, 80, 'Downloading processed video...');
     console.log(`[${jobId}] Background removal complete!`);
 
     // Download the processed video - SDK returns { data, requestId }
@@ -6079,6 +6605,8 @@ async function handleRemoveVideoBg(req, res, sessionId) {
     console.log(`[${jobId}] Saved video: ${asset.filename}`);
     console.log(`[${jobId}] === DICAPRIO REMOVE BG COMPLETE ===\n`);
 
+    completeJob(removeBgJobId, { assetId: newVideoId, duration: videoDuration });
+
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({
       success: true,
@@ -6093,6 +6621,7 @@ async function handleRemoveVideoBg(req, res, sessionId) {
 
   } catch (error) {
     console.error('Video background removal error:', error);
+    if (typeof removeBgJobId !== 'undefined') failJob(removeBgJobId, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -7704,6 +8233,8 @@ async function handleExtractAudio(req, res, sessionId) {
     }
 
     const jobId = sessionId.substring(0, 8);
+    const extractJobId = randomUUID();
+    registerJob(sessionId, extractJobId, 'extract-audio', `Extract audio from ${videoAsset.filename}`, assetId);
     console.log(`\n[${jobId}] === EXTRACT AUDIO ===`);
     console.log(`[${jobId}] Source video: ${videoAsset.filename}`);
 
@@ -7715,6 +8246,7 @@ async function handleExtractAudio(req, res, sessionId) {
     const mutedThumbPath = join(session.assetsDir, `${mutedVideoAssetId}_thumb.jpg`);
 
     // Step 1: Extract audio from video
+    updateJobProgress(extractJobId, 10, 'Extracting audio track...');
     console.log(`[${jobId}] Step 1: Extracting audio...`);
     await runFFmpeg([
       '-y', '-i', videoAsset.path,
@@ -7725,6 +8257,7 @@ async function handleExtractAudio(req, res, sessionId) {
     ], jobId);
 
     // Step 2: Create muted version of video
+    updateJobProgress(extractJobId, 40, 'Creating muted video...');
     console.log(`[${jobId}] Step 2: Creating muted video...`);
     await runFFmpeg([
       '-y', '-i', videoAsset.path,
@@ -7734,6 +8267,7 @@ async function handleExtractAudio(req, res, sessionId) {
     ], jobId);
 
     // Step 3: Generate thumbnail for muted video
+    updateJobProgress(extractJobId, 70, 'Generating thumbnail...');
     try {
       await runFFmpeg([
         '-y', '-i', mutedVideoPath,
@@ -7797,6 +8331,8 @@ async function handleExtractAudio(req, res, sessionId) {
     console.log(`[${jobId}] ✓ Muted video created: ${mutedAsset.filename}`);
     console.log(`[${jobId}] === EXTRACT AUDIO COMPLETE ===\n`);
 
+    completeJob(extractJobId, { audioAssetId, mutedVideoAssetId });
+
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({
       success: true,
@@ -7820,6 +8356,7 @@ async function handleExtractAudio(req, res, sessionId) {
 
   } catch (error) {
     console.error('Extract audio error:', error);
+    if (typeof extractJobId !== 'undefined') failJob(extractJobId, error.message);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -7867,6 +8404,9 @@ async function handleProcessAsset(req, res, sessionId) {
     const outputPath = join(session.assetsDir, `${newAssetId}.mp4`);
     const thumbPath = join(session.assetsDir, `${newAssetId}_thumb.jpg`);
 
+    // Register job for Processing View
+    registerJob(sessionId, jobId, 'ffmpeg-edit', `Processing ${asset.filename}`, assetId);
+
     console.log(`\n[${jobId}] === PROCESS ASSET WITH FFMPEG ===`);
     console.log(`[${jobId}] Source: ${asset.filename}`);
     console.log(`[${jobId}] Command: ${command}`);
@@ -7894,7 +8434,7 @@ async function handleProcessAsset(req, res, sessionId) {
 
     console.log(`[${jobId}] FFmpeg args:`, ffmpegArgs);
 
-    await runFFmpeg(ffmpegArgs, jobId);
+    await runFFmpeg(ffmpegArgs, jobId, { registeredJobId: jobId, durationSec: asset.duration || 0 });
 
     // Generate thumbnail
     await runFFmpeg([
@@ -7942,6 +8482,8 @@ async function handleProcessAsset(req, res, sessionId) {
     console.log(`[${jobId}] Asset processed: ${newAssetId} (${duration.toFixed(2)}s)`);
     console.log(`[${jobId}] === PROCESSING COMPLETE ===\n`);
 
+    completeJob(jobId, { assetId: newAssetId });
+
     res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({
       success: true,
@@ -7954,6 +8496,7 @@ async function handleProcessAsset(req, res, sessionId) {
 
   } catch (error) {
     console.error('Process asset error:', error);
+    failJob(jobId, error);
     res.writeHead(500, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ error: error.message }));
   }
@@ -8038,10 +8581,54 @@ const server = http.createServer(async (req, res) => {
       await handleSessionProcess(req, res, sessionId);
     } else if (req.method === 'POST' && action === 'remove-dead-air') {
       await handleSessionRemoveDeadAir(req, res, sessionId);
+    } else if (req.method === 'POST' && action === 'cut-repeated-lines') {
+      await handleCutRepeatedLines(req, res, sessionId);
     } else if (req.method === 'POST' && action === 'chapters') {
       await handleSessionChapters(req, res, sessionId);
     } else if (req.method === 'DELETE' && !action) {
       handleSessionDelete(req, res, sessionId);
+    }
+    // Job registry endpoints (Processing View)
+    else if (req.method === 'GET' && action === 'jobs') {
+      const jobs = getSessionJobs(sessionId);
+      res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+      res.end(JSON.stringify({ jobs }));
+    }
+    else if (req.method === 'GET' && action === 'jobs/stream') {
+      // SSE endpoint — keep connection open, push job updates
+      res.writeHead(200, {
+        'Content-Type': 'text/event-stream',
+        'Cache-Control': 'no-cache',
+        'Connection': 'keep-alive',
+        'Access-Control-Allow-Origin': '*',
+      });
+      res.write('\n'); // Initial flush
+
+      // Register this connection
+      if (!jobSSEClients.has(sessionId)) {
+        jobSSEClients.set(sessionId, new Set());
+      }
+      jobSSEClients.get(sessionId).add(res);
+
+      // Send current jobs snapshot immediately
+      const currentJobs = getSessionJobs(sessionId);
+      res.write(`data: ${JSON.stringify({ type: 'snapshot', jobs: currentJobs })}\n\n`);
+
+      // Heartbeat every 15s to keep connection alive
+      const heartbeat = setInterval(() => {
+        try { res.write(': heartbeat\n\n'); } catch { clearInterval(heartbeat); }
+      }, 15000);
+
+      // Clean up on disconnect
+      req.on('close', () => {
+        clearInterval(heartbeat);
+        const clients = jobSSEClients.get(sessionId);
+        if (clients) {
+          clients.delete(res);
+          if (clients.size === 0) jobSSEClients.delete(sessionId);
+        }
+      });
+      return; // Don't end response — keep SSE stream open
     }
     // Multi-asset endpoints
     else if (req.method === 'POST' && action === 'assets') {

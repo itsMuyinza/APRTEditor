@@ -27,6 +27,7 @@ interface TimelineProps {
   onDropAsset: (asset: Asset, trackId: string, time: number) => void;
   onSave: () => void;
   getCaptionData?: (clipId: string) => CaptionData | null;
+  zoomSignal?: { counter: number; delta: number }; // Keyboard-driven zoom: counter triggers effect, delta is +/- 0.25
 }
 
 const TRACK_HEIGHTS: Record<string, number> = {
@@ -65,6 +66,7 @@ export default function Timeline({
   onDropAsset,
   onSave,
   getCaptionData,
+  zoomSignal,
 }: TimelineProps) {
   const [zoom, setZoom] = useState(1);
   const [isDraggingPlayhead, setIsDraggingPlayhead] = useState(false);
@@ -88,23 +90,14 @@ export default function Timeline({
     return () => tracksContainer.removeEventListener('scroll', handleScroll);
   }, []);
 
-  // Keyboard shortcuts
+  // Keyboard-driven zoom: external signal from useKeyboardShortcuts
+  const prevZoomCounterRef = useRef(0);
   useEffect(() => {
-    const handleKeyDown = (e: KeyboardEvent) => {
-      // Delete selected clip with Delete or Backspace key
-      if ((e.key === 'Delete' || e.key === 'Backspace') && selectedClipId) {
-        // Don't trigger if user is typing in an input
-        if (e.target instanceof HTMLInputElement || e.target instanceof HTMLTextAreaElement) {
-          return;
-        }
-        e.preventDefault();
-        onDeleteClip(selectedClipId);
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [selectedClipId, onDeleteClip]);
+    if (zoomSignal && zoomSignal.counter !== prevZoomCounterRef.current) {
+      setZoom(prev => Math.min(4, Math.max(0.25, prev + zoomSignal.delta)));
+      prevZoomCounterRef.current = zoomSignal.counter;
+    }
+  }, [zoomSignal]);
 
   // Calculate display properties
   const totalDuration = Math.max(duration, 10);

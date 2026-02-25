@@ -25,10 +25,10 @@ interface PicassoPanelProps {
 }
 
 const QUICK_ACTIONS = [
-  { icon: Image, text: 'Generate a vintage archival photograph' },
-  { icon: Square, text: 'Create a hip-hop era album cover image' },
-  { icon: RectangleVertical, text: 'Design a documentary chapter title background' },
-  { icon: Sparkles, text: 'Create a nostalgic film texture' },
+  { icon: Image, text: 'Generate an archival documentary still with warm film grain' },
+  { icon: Square, text: 'Create a vintage album cover with golden tones and texture' },
+  { icon: RectangleVertical, text: 'Design a chapter title card — dark bg, gold serif text, film dust' },
+  { icon: Sparkles, text: 'Create a textured background with 16mm film grain and scratches' },
 ];
 
 export default function PicassoPanel({

@@ -8,13 +8,15 @@ import CaptionPropertiesPanel from '@/react-app/components/CaptionPropertiesPane
 import AIPromptPanel from '@/react-app/components/AIPromptPanel';
 import PicassoPanel from '@/react-app/components/PicassoPanel';
 import DiCaprioPanel from '@/react-app/components/DiCaprioPanel';
+import ProcessingView from '@/react-app/components/ProcessingView';
 import GifSearchPanel from '@/react-app/components/GifSearchPanel';
 import ResizablePanel from '@/react-app/components/ResizablePanel';
 import ResizableVerticalPanel from '@/react-app/components/ResizableVerticalPanel';
 import TimelineTabs from '@/react-app/components/TimelineTabs';
 import { useProject, Asset, TimelineClip, CaptionStyle } from '@/react-app/hooks/useProject';
 import { useVideoSession } from '@/react-app/hooks/useVideoSession';
-import { Sparkles, ListOrdered, Copy, Check, X, Download, Play, Palette, Film, FolderOpen, Package } from 'lucide-react';
+import { useKeyboardShortcuts } from '@/react-app/hooks/useKeyboardShortcuts';
+import { Sparkles, ListOrdered, Copy, Check, X, Download, Palette, Film, FolderOpen, Package, Activity } from 'lucide-react';
 import type { TemplateId } from '@/remotion/templates';
 
 interface ChapterData {
@@ -34,9 +36,11 @@ export default function Home() {
   const [previewAssetId, setPreviewAssetId] = useState<string | null>(null);
   const [aspectRatio, setAspectRatio] = useState<'16:9' | '9:16'>('16:9');
   const [autoSnap, setAutoSnap] = useState(true); // Ripple delete mode - shift clips when deleting
-  const [activeAgent, setActiveAgent] = useState<'director' | 'picasso' | 'dicaprio'>('director');
+  const [activeAgent, setActiveAgent] = useState<'director' | 'picasso' | 'dicaprio' | 'processing'>('director');
+  const prevAgentRef = useRef<'director' | 'picasso' | 'dicaprio'>('director');
   const [showGifSearch, setShowGifSearch] = useState(false);
   const [libraryTab, setLibraryTab] = useState<'project' | 'library'>('project');
+  const [directorExternalPrompt, setDirectorExternalPrompt] = useState({ text: '', counter: 0 });
 
   const videoPreviewRef = useRef<VideoPreviewHandle>(null);
   const playbackRef = useRef<number | null>(null);
@@ -77,7 +81,11 @@ export default function Home() {
     updateTabClips,
     updateTabAsset,
     // Settings
+    settings,
     setSettings,
+    // Undo / Redo
+    undo,
+    redo,
   } = useProject();
 
   // Compute the active clips based on which tab is selected
@@ -287,7 +295,6 @@ export default function Home() {
     setCurrentTime(time);
     // Don't seek the video directly - let the clipTime prop handle it
   }, []);
-
 
   // Handle asset upload
   const handleAssetUpload = useCallback(async (files: FileList) => {
@@ -535,6 +542,22 @@ export default function Home() {
     setSelectedClipId(layerId);
     setPreviewAssetId(null);
   }, []);
+
+  // Processing View auto-switch callbacks
+  const handleJobStarted = useCallback(() => {
+    // Remember current tab (only if not already on processing)
+    if (activeAgent !== 'processing') {
+      prevAgentRef.current = activeAgent as 'director' | 'picasso' | 'dicaprio';
+      setActiveAgent('processing');
+    }
+  }, [activeAgent]);
+
+  const handleAllJobsComplete = useCallback(() => {
+    // Switch back to the tab the user was on before
+    if (activeAgent === 'processing') {
+      setActiveAgent(prevAgentRef.current);
+    }
+  }, [activeAgent]);
 
   // Handle AI edit (using FFmpeg on video assets)
   const handleApplyEdit = useCallback(async (command: string) => {
@@ -929,6 +952,64 @@ export default function Home() {
     return {
       duration: result.duration,
       removedDuration: result.removedDuration,
+    };
+  }, [session, assets, clips, refreshAssets, updateClip, saveProject]);
+
+  // Handle cutting repeated lines/takes from narration video
+  const handleCutRepeatedLines = useCallback(async (): Promise<{ duration: number; removedDuration: number; summary: string }> => {
+    if (!session) {
+      throw new Error('No session available');
+    }
+
+    const videoAsset = assets.find(a => a.type === 'video' && !a.aiGenerated) || assets.find(a => a.type === 'video');
+    if (!videoAsset) {
+      throw new Error('Please upload a video first');
+    }
+
+    console.log('Cutting repeated lines from video...');
+
+    const response = await fetch(`http://localhost:3333/session/${session.sessionId}/cut-repeated-lines`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ assetId: videoAsset.id }),
+    });
+
+    if (!response.ok) {
+      const error = await response.json();
+      throw new Error(error.error || 'Failed to cut repeated lines');
+    }
+
+    const result = await response.json();
+    console.log('Cut repeated lines result:', result);
+
+    // Refresh assets to get updated video with cache-busted URL
+    const refreshedAssets = await refreshAssets();
+
+    // Update V1 clip duration
+    if (result.duration) {
+      const assetPool = refreshedAssets.length > 0 ? refreshedAssets : assets;
+      const currentVideoAsset = assetPool.find(a => a.type === 'video' && !a.aiGenerated) || assetPool.find(a => a.type === 'video');
+
+      const v1Clip = clips.find(c => c.trackId === 'V1');
+      if (v1Clip) {
+        const updates: Partial<typeof v1Clip> = {
+          duration: result.duration,
+          outPoint: result.duration,
+        };
+        if (currentVideoAsset && v1Clip.assetId !== currentVideoAsset.id) {
+          console.log(`[CutRepeated] Fixing stale asset ref: ${v1Clip.assetId} -> ${currentVideoAsset.id}`);
+          updates.assetId = currentVideoAsset.id;
+        }
+        console.log(`[CutRepeated] Updating clip ${v1Clip.id}: duration ${v1Clip.duration} -> ${result.duration}`);
+        updateClip(v1Clip.id, updates);
+      }
+      await saveProject();
+    }
+
+    return {
+      duration: result.duration,
+      removedDuration: result.removedDuration,
+      summary: result.summary || '',
     };
   }, [session, assets, clips, refreshAssets, updateClip, saveProject]);
 
@@ -1507,27 +1588,98 @@ export default function Home() {
     }
   }, [session, assets, addClip, saveProject, getDuration, refreshAssets]);
 
-  // Handle render/export
+  // Handle render/export — dual export (landscape + portrait)
   const handleExport = useCallback(async () => {
     if (clips.length === 0) {
       alert('Add some clips to the timeline first');
       return;
     }
 
-    try {
-      const downloadUrl = await renderProject(false);
-      // Trigger download
+    const triggerDownload = (url: string, filename: string) => {
       const link = document.createElement('a');
-      link.href = downloadUrl;
-      link.download = 'export.mp4';
+      link.href = url;
+      link.download = filename;
       document.body.appendChild(link);
       link.click();
       document.body.removeChild(link);
+    };
+
+    try {
+      // 1. Render at current project dimensions (e.g., 16:9 → 1920×1080)
+      const isLandscape = settings.width >= settings.height;
+      const landscapeUrl = await renderProject(false, {
+        outputFilename: 'export-landscape.mp4',
+        renderLabel: 'Landscape (16:9)',
+      });
+      triggerDownload(landscapeUrl, 'export-landscape.mp4');
+
+      // 2. Render at opposite aspect ratio with center crop
+      // For standard 1080p landscape → 1080×1920 portrait
+      const verticalWidth = isLandscape ? 1080 : settings.width;
+      const verticalHeight = isLandscape ? 1920 : Math.round(settings.width * 16 / 9);
+
+      const portraitUrl = await renderProject(false, {
+        outputWidth: verticalWidth,
+        outputHeight: verticalHeight,
+        cropMode: 'subject-track',
+        outputFilename: 'export-portrait.mp4',
+        renderLabel: 'Portrait (9:16)',
+      });
+
+      // Small delay so browser handles two downloads gracefully
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      triggerDownload(portraitUrl, 'export-portrait.mp4');
+
     } catch (error) {
       console.error('Export failed:', error);
       alert(`Export failed: ${error instanceof Error ? error.message : 'Unknown error'}`);
     }
-  }, [clips.length, renderProject]);
+  }, [clips.length, settings, renderProject]);
+
+  // ── Keyboard shortcuts (Premiere Pro map) ──
+
+  // Zoom signal: counter + delta, consumed by Timeline via prop
+  const [zoomSignal, setZoomSignal] = useState({ counter: 0, delta: 0 });
+
+  const seekRelative = useCallback((seconds: number) => {
+    setCurrentTime(prev => Math.max(0, prev + seconds));
+  }, []);
+
+  const seekTo = useCallback((time: number) => {
+    setCurrentTime(Math.max(0, time));
+  }, []);
+
+  const pausePlayback = useCallback(() => {
+    setIsPlaying(false);
+  }, []);
+
+  const handleZoomDelta = useCallback((delta: number) => {
+    setZoomSignal(prev => ({ counter: prev.counter + 1, delta }));
+  }, []);
+
+  // Submit a prompt to the Director AI panel programmatically (from keyboard quick keys)
+  const submitDirectorPrompt = useCallback((text: string) => {
+    setActiveAgent('director');
+    setDirectorExternalPrompt(prev => ({ text, counter: prev.counter + 1 }));
+  }, []);
+
+  useKeyboardShortcuts({
+    togglePlayback: handlePlayPause,
+    pause: pausePlayback,
+    seekRelative,
+    seekTo,
+    getDuration,
+    splitAtPlayhead: handleCutAtPlayhead,
+    deleteSelectedClip: () => { if (selectedClipId) handleDeleteClip(selectedClipId); },
+    selectedClipId,
+    undo,
+    redo,
+    saveProject,
+    handleExport,
+    toggleAutoSnap: () => setAutoSnap(prev => !prev),
+    setZoomDelta: handleZoomDelta,
+    submitDirectorPrompt,
+  });
 
   // Edit an existing animation with a new prompt
   const handleEditAnimation = useCallback(async (
@@ -1878,10 +2030,25 @@ export default function Home() {
                 </div>
               </div>
             ) : (
-              <div className="flex flex-col items-center justify-center text-zinc-500">
-                <Play className="w-16 h-16 mb-4 opacity-50" />
-                <p className="text-sm">Upload assets from the left panel</p>
-                <p className="text-xs text-zinc-600 mt-1">Drag them to the timeline below</p>
+              <div className="flex flex-col items-center justify-center text-zinc-500 max-w-md text-center">
+                <div className="w-16 h-16 mb-4 rounded-2xl bg-gradient-to-br from-yellow-500/20 to-amber-600/20 flex items-center justify-center">
+                  <Film className="w-8 h-8 text-yellow-500/70" />
+                </div>
+                <p className="text-sm font-medium text-zinc-400">Drop your footage to start editing</p>
+                <p className="text-xs text-zinc-600 mt-1 mb-4">Upload assets from the left panel, then drag them to the timeline</p>
+                <div className="flex flex-wrap gap-2 justify-center text-[10px] text-zinc-600">
+                  <kbd className="px-1.5 py-0.5 bg-zinc-800 rounded border border-zinc-700">Space</kbd>
+                  <span>Play</span>
+                  <span className="text-zinc-700">·</span>
+                  <kbd className="px-1.5 py-0.5 bg-zinc-800 rounded border border-zinc-700">S</kbd>
+                  <span>Split</span>
+                  <span className="text-zinc-700">·</span>
+                  <kbd className="px-1.5 py-0.5 bg-zinc-800 rounded border border-zinc-700">⌘⇧C</kbd>
+                  <span>Captions</span>
+                  <span className="text-zinc-700">·</span>
+                  <kbd className="px-1.5 py-0.5 bg-zinc-800 rounded border border-zinc-700">⌘Z</kbd>
+                  <span>Undo</span>
+                </div>
               </div>
             )}
           </div>
@@ -1918,6 +2085,7 @@ export default function Home() {
               onDropAsset={handleDropAsset}
               onSave={saveProject}
               getCaptionData={getCaptionData}
+              zoomSignal={zoomSignal}
             />
           </ResizableVerticalPanel>
         </div>
@@ -1965,6 +2133,17 @@ export default function Home() {
                 <Film className="w-3.5 h-3.5" />
                 DiCaprio
               </button>
+              <button
+                onClick={() => setActiveAgent('processing')}
+                className={`flex items-center gap-1.5 px-3 py-2 text-sm font-medium transition-colors ${
+                  activeAgent === 'processing'
+                    ? 'text-blue-400 border-b-2 border-blue-400 bg-zinc-800/30'
+                    : 'text-zinc-400 hover:text-zinc-200 hover:bg-zinc-800/20'
+                }`}
+              >
+                <Activity className="w-3.5 h-3.5" />
+                Jobs
+              </button>
             </div>
 
             {/* AI Chat Panels - both mounted to preserve state, hidden via CSS */}
@@ -1976,6 +2155,7 @@ export default function Home() {
                   onTranscribeAndAddCaptions={handleTranscribeAndAddCaptions}
                   onGenerateBroll={handleGenerateBroll}
                   onRemoveDeadAir={handleRemoveDeadAir}
+                  onCutRepeatedLines={handleCutRepeatedLines}
                   onChapterCuts={handleChapterCuts}
                   onAddMotionGraphic={handleAddMotionGraphicFromPrompt}
                   onCreateCustomAnimation={handleCreateCustomAnimation}
@@ -2000,6 +2180,7 @@ export default function Home() {
                   activeTabId={activeTabId}
                   editTabAssetId={activeTabId !== 'main' ? timelineTabs.find(t => t.id === activeTabId)?.assetId : undefined}
                   editTabClips={activeTabId !== 'main' ? timelineTabs.find(t => t.id === activeTabId)?.clips : undefined}
+                  externalPrompt={directorExternalPrompt}
                 />
               </div>
               <div className={`absolute inset-0 ${activeAgent === 'picasso' ? '' : 'hidden'}`}>
@@ -2019,6 +2200,13 @@ export default function Home() {
                     console.log('Video generated:', assetId);
                   }}
                   onRefreshAssets={refreshAssets}
+                />
+              </div>
+              <div className={`absolute inset-0 ${activeAgent === 'processing' ? '' : 'hidden'}`}>
+                <ProcessingView
+                  sessionId={session?.sessionId ?? null}
+                  onJobStarted={handleJobStarted}
+                  onAllJobsComplete={handleAllJobsComplete}
                 />
               </div>
             </div>

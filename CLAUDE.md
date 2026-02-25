@@ -157,3 +157,20 @@ The segment-based approach (extract + concat) is required — single-pass filter
 - Vite config uses `@cloudflare/vite-plugin` and `@getmocha/vite-plugins`. `chunkSizeWarningLimit: 5000` due to Remotion's size.
 - `wrangler.json` app name is a UUID (Mocha app ID). SPA routing via `not_found_handling: "single-page-application"`.
 - No tests exist in the codebase. No testing framework is configured.
+
+
+---
+
+## Integration Safety Rule — Simulate Failure Before Shipping
+
+**MANDATORY for all config changes, dependency wiring, and integration code.**
+
+Before committing any change that involves fallbacks, retries, shared resources, or multi-component wiring:
+
+1. **Trace the failure path**: If the primary fails, what exact path does the fallback take? Walk through it step by step.
+2. **Check shared dependencies**: Does the fallback share any resource (auth profile, API key, rate limit bucket, database connection, token pool) with what just failed? If yes, the fallback will also fail — fix the design.
+3. **Simulate the cascade**: If component A fails → does it put component B in a broken state? Does an error in one retry path poison the next?
+4. **Verify independence**: Primary and fallback paths MUST use independent credentials, providers, and failure domains. Two things sharing a single point of failure is not redundancy — it is a single point of failure with extra steps.
+
+> "Code that is syntactically valid but fails at runtime due to shared dependencies is worse than a compile error — it looks like it works until it does not."
+

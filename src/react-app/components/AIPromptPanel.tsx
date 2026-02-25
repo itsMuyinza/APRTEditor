@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Sparkles, Send, Wand2, Clock, Terminal, CheckCircle, Loader2, VolumeX, Type, Image, Zap, X, Scissors, Plus, Film, Music, MapPin, Timer, ImagePlus, Mic, Camera } from 'lucide-react';
+import { Sparkles, Send, Wand2, Clock, Terminal, CheckCircle, Loader2, VolumeX, Type, Image, Zap, X, Scissors, Plus, Film, Music, MapPin, Timer, ImagePlus, Mic, Camera, Headphones, Volume2, Music2, Palette, Contrast, Sun, Circle, Repeat } from 'lucide-react';
 import type { TimelineClip, Track, Asset } from '@/react-app/hooks/useProject';
 import { MOTION_TEMPLATES, type TemplateId } from '@/remotion/templates';
 import MotionGraphicsPanel from './MotionGraphicsPanel';
@@ -169,6 +169,7 @@ interface AIPromptPanelProps {
   onTranscribeAndAddCaptions?: (options?: CaptionOptions) => Promise<void>;
   onGenerateBroll?: () => Promise<void>;
   onRemoveDeadAir?: () => Promise<{ duration: number; removedDuration: number }>;
+  onCutRepeatedLines?: () => Promise<{ duration: number; removedDuration: number; summary: string }>;
   onChapterCuts?: () => Promise<ChapterCutResult>;
   onAddMotionGraphic?: (config: MotionGraphicConfig) => Promise<void>;
   onCreateCustomAnimation?: (description: string, startTime?: number, endTime?: number, attachedAssetIds?: string[], durationSeconds?: number) => Promise<CustomAnimationResult>;
@@ -195,6 +196,8 @@ interface AIPromptPanelProps {
   activeTabId?: string;
   editTabAssetId?: string;
   editTabClips?: TimelineClip[]; // Clips in the edit tab's timeline
+  // External prompt injection (keyboard quick keys)
+  externalPrompt?: { text: string; counter: number };
 }
 
 export default function AIPromptPanel({
@@ -203,6 +206,7 @@ export default function AIPromptPanel({
   onTranscribeAndAddCaptions,
   onGenerateBroll,
   onRemoveDeadAir,
+  onCutRepeatedLines,
   onChapterCuts,
   onAddMotionGraphic,
   onCreateCustomAnimation,
@@ -227,6 +231,7 @@ export default function AIPromptPanel({
   activeTabId = 'main',
   editTabAssetId,
   editTabClips = [],
+  externalPrompt,
 }: AIPromptPanelProps) {
   const [prompt, setPrompt] = useState('');
   const [isProcessing, setIsProcessing] = useState(false);
@@ -257,6 +262,20 @@ export default function AIPromptPanel({
 
   // Intentionally unused - kept for backwards compatibility
   void _onCreateContextualAnimation;
+
+  // External prompt injection from keyboard quick keys
+  const externalPromptRef = useRef<number>(0);
+  const formRef = useRef<HTMLFormElement>(null);
+  useEffect(() => {
+    if (externalPrompt && externalPrompt.counter !== externalPromptRef.current) {
+      externalPromptRef.current = externalPrompt.counter;
+      setPrompt(externalPrompt.text);
+      // Submit on next tick after prompt state updates
+      setTimeout(() => {
+        formRef.current?.requestSubmit();
+      }, 50);
+    }
+  }, [externalPrompt]);
 
   // Compute V1 clip context from edit tab timeline (hybrid approach)
   // This auto-detects what's on V1 to give the AI context about available clips
@@ -541,18 +560,29 @@ export default function AIPromptPanel({
   ];
 
   const suggestions = [
+    // ── Core editing ──
     { icon: Mic, text: 'Add narration captions' },
     { icon: VolumeX, text: 'Remove dead air / silence' },
+    { icon: Repeat, text: 'Cut repeated lines (keep last take)' },
+    { icon: Scissors, text: 'Cut at chapters' },
+    { icon: Clock, text: 'Speed up by 1.5x' },
+    // ── Audio processing ──
+    { icon: Headphones, text: 'Enhance voice clarity' },
+    { icon: Volume2, text: 'Normalize audio to -14 LUFS' },
+    { icon: Music2, text: 'Boost bass frequencies' },
+    { icon: Music, text: 'Extract audio to A1' },
+    // ── Visual grades ──
     { icon: Film, text: 'Apply film grain overlay' },
+    { icon: Palette, text: 'Apply warm vintage grade' },
+    { icon: Contrast, text: 'Increase contrast' },
+    { icon: Sun, text: 'Add sepia tone' },
+    { icon: Circle, text: 'Add vignette effect' },
+    // ── Motion & graphics ──
     { icon: Type, text: 'Create documentary title card' },
     { icon: Image, text: 'Add archival B-roll images' },
-    { icon: Wand2, text: 'Remove background noise' },
     { icon: Sparkles, text: 'Create APRT intro animation' },
-    { icon: Scissors, text: 'Cut at chapters' },
-    { icon: Music, text: 'Extract audio to A1' },
     { icon: Camera, text: 'Add Ken Burns zoom effect' },
     { icon: Zap, text: 'Add 5 animations' },
-    { icon: Clock, text: 'Speed up by 1.5x' },
   ];
 
   // Check if prompt is asking for a contextual animation (intro/outro that needs video context)
@@ -887,6 +917,7 @@ export default function AIPromptPanel({
     | 'auto-gif'            // Extract keywords and add GIFs
     | 'b-roll'              // Generate AI B-roll images
     | 'dead-air'            // Remove silence from video
+    | 'cut-repeated-lines'  // Remove repeated takes, keep last
     | 'chapter-cuts'        // Split video into chapters
     | 'transcript-animation' // Kinetic typography from speech
     | 'contextual-animation' // Animation based on video content
@@ -975,6 +1006,14 @@ export default function AIPromptPanel({
     if (lower.includes('dead air') || lower.includes('silence') ||
         lower.includes('remove quiet') || lower.includes('remove pauses')) {
       return 'dead-air';
+    }
+
+    // Cut repeated lines / takes
+    if (lower.includes('repeated lines') || lower.includes('repeated takes') ||
+        lower.includes('keep last take') || lower.includes('cut retakes') ||
+        lower.includes('remove retakes') || lower.includes('duplicate takes') ||
+        lower.includes('re-did') || lower.includes('redo lines')) {
+      return 'cut-repeated-lines';
     }
 
     // Extract audio from video
@@ -2142,6 +2181,63 @@ export default function AIPromptPanel({
       return;
     }
 
+    // Cut repeated lines (keep last take)
+    if (workflow === 'cut-repeated-lines') {
+      if (!hasVideo) {
+        setChatHistory(prev => [...prev, {
+          type: 'assistant',
+          text: 'Please upload a narration video first. I\'ll analyze the transcript for repeated takes and keep only the best one.',
+        }]);
+        return;
+      }
+      if (!onCutRepeatedLines) return;
+
+      setIsProcessing(true);
+      setProcessingStatus('Analyzing transcript for repeated takes...');
+
+      try {
+        setChatHistory(prev => [...prev, {
+          type: 'assistant',
+          text: '🎤 Analyzing your narration for repeated takes...\n\n1. Transcribing video with word timestamps\n2. Identifying repeated lines and retakes\n3. Keeping the last (best) take of each\n4. Removing earlier takes and concatenating',
+          isProcessingGifs: true,
+        }]);
+
+        const result = await onCutRepeatedLines();
+
+        setChatHistory(prev => {
+          const updated = [...prev];
+          const lastIdx = updated.length - 1;
+          if (updated[lastIdx]?.isProcessingGifs) {
+            const message = result.removedDuration > 0
+              ? `✅ Repeated takes removed!\n\nRemoved: ${result.removedDuration.toFixed(1)} seconds of retakes\nNew duration: ${result.duration.toFixed(1)} seconds\n\n${result.summary}`
+              : `✅ No repeated takes detected.\n\n${result.summary}`;
+            updated[lastIdx] = {
+              ...updated[lastIdx],
+              text: message,
+              isProcessingGifs: false,
+              applied: true,
+            };
+          }
+          return updated;
+        });
+
+      } catch (error) {
+        console.error('Cut repeated lines error:', error);
+        const errorMessage = error instanceof Error ? error.message : 'Unknown error';
+        const isSessionExpired = errorMessage.includes('no longer exist') || errorMessage.includes('ASSET_FILE_MISSING');
+        setChatHistory(prev => [...prev, {
+          type: 'assistant',
+          text: isSessionExpired
+            ? '❌ Session expired - your video files are no longer available. Please re-upload your video and try again.'
+            : `❌ Error: ${errorMessage}. Please try again.`,
+        }]);
+      } finally {
+        setIsProcessing(false);
+        setProcessingStatus('');
+      }
+      return;
+    }
+
     // Chapter cuts
     if (workflow === 'chapter-cuts') {
       if (!hasVideo) {
@@ -2612,7 +2708,7 @@ export default function AIPromptPanel({
       )}
 
       {/* Input */}
-      <form onSubmit={handleSubmit} className="p-4 border-t border-zinc-800/50">
+      <form ref={formRef} onSubmit={handleSubmit} className="p-4 border-t border-zinc-800/50">
         {/* Motion Graphics Button */}
         <button
           type="button"
